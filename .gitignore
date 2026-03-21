@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+
+# Personal config (contains IPs, SSH keys, credentials)
+cybersync.bat
+cybersync.vbs
+.mcp.json
+integrations/

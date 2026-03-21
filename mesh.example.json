@@ -1,0 +1,39 @@
+{
+  "nodes": [
+    {
+      "id": "server1",
+      "alias": "s1",
+      "host": "10.0.0.1",
+      "port": 22,
+      "user": "root",
+      "identityFile": "id_ed25519",
+      "os": "linux",
+      "role": "storage",
+      "tags": ["vps", "primary", "docker"]
+    },
+    {
+      "id": "server2",
+      "alias": "s2",
+      "host": "10.0.0.2",
+      "port": 22,
+      "user": "root",
+      "identityFile": "id_ed25519",
+      "os": "linux",
+      "role": "compute",
+      "tags": ["vps", "secondary"]
+    },
+    {
+      "id": "laptop",
+      "alias": "lp",
+      "host": "10.0.0.3",
+      "port": 22,
+      "user": "root",
+      "identityFile": "id_ed25519",
+      "os": "linux",
+      "role": "gpu+browser",
+      "tags": ["laptop", "gpu"]
+    }
+  ],
+  "meshSubnet": "10.0.0.0/24",
+  "defaultNode": "local"
+}

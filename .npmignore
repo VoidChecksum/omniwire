@@ -1,0 +1,10 @@
+src/
+tsconfig.json
+.gitignore
+.git/
+node_modules/
+*.tsbuildinfo
+cybersync.bat
+cybersync.vbs
+.mcp.json
+integrations/
