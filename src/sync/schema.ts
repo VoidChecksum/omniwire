@@ -66,6 +66,8 @@ const STATEMENTS: readonly string[] = [
     to_tsvector('english', key || ' ' || value::text)
   )`,
   'CREATE INDEX IF NOT EXISTS idx_sync_events_created_desc ON sync_events(created_at DESC)',
+  // v2.2 migration: encrypted flag for at-rest encryption
+  `ALTER TABLE sync_items ADD COLUMN IF NOT EXISTS encrypted BOOLEAN DEFAULT false`,
 ];
 
 export async function runMigrations(pool: pg.Pool): Promise<void> {

@@ -31,7 +31,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     'omniwire_exec',
     'Execute a command on a specific mesh node. Defaults to auto-selecting based on command context.',
     {
-      node: z.string().optional().describe('Target node id. Auto-selects storage node if omitted.'),
+      node: z.string().optional().describe('Target node id. Auto-selects if omitted.'),
       command: z.string().describe('Shell command to run on the remote node via SSH'),
       timeout: z.number().optional().describe('Timeout in seconds (default 30)'),
     },
@@ -123,7 +123,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
   // --- Tool 5: omniwire_read_file ---
   server.tool(
     'omniwire_read_file',
-    'Read a file from any mesh node. Defaults to the configured storage node.',
+    'Read a file from any mesh node. Default node: storage node.',
     {
       path: z.string().describe('Absolute file path, or "node:/path" format'),
       node: z.string().optional().describe('Node id. Defaults to storage node.'),
@@ -150,7 +150,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
   // --- Tool 6: omniwire_write_file ---
   server.tool(
     'omniwire_write_file',
-    'Write/create a file on any mesh node. Defaults to the configured storage node.',
+    'Write/create a file on any mesh node. Default: storage node.',
     {
       path: z.string().describe('Absolute file path, or "node:/path" format'),
       content: z.string().describe('File content to write'),
@@ -354,10 +354,10 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
   // --- Tool 15: omniwire_docker ---
   server.tool(
     'omniwire_docker',
-    'Run docker commands on a node. Defaults to the configured storage node.',
+    'Run docker commands on a node. Default: storage node.',
     {
       command: z.string().describe('Docker subcommand (ps, run, logs, images, etc.)'),
-      node: z.string().optional().describe('Node id. Defaults to storage node.'),
+      node: z.string().optional().describe('Node id (default: storage node)'),
     },
     async ({ command, node }) => {
       const nodeId = node ?? getDefaultNodeForTask('storage');
@@ -370,10 +370,10 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
   // --- Tool 16: omniwire_open_browser ---
   server.tool(
     'omniwire_open_browser',
-    'Open a URL in a browser. Defaults to the configured GPU/browser node.',
+    'Open a URL in a browser. Default: gpu+browser node.',
     {
       url: z.string().describe('URL to open'),
-      node: z.string().optional().describe('Node to open on. Defaults to GPU/browser node.'),
+      node: z.string().optional().describe('Node to open on (default: gpu+browser node)'),
     },
     async ({ url, node }) => {
       const result = await openBrowser(manager, url, node);
@@ -543,6 +543,30 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       const results = await manager.execAll(cmd);
       const text = results.map((r) => `[${r.nodeId}]\n${r.stdout}`).join('\n\n');
       return { content: [{ type: 'text', text }] };
+    }
+  );
+
+  // --- Tool 23: omniwire_update ---
+  server.tool(
+    'omniwire_update',
+    'Check for updates and self-update OmniWire to the latest version.',
+    {
+      check_only: z.boolean().optional().describe('Only check for updates without installing (default: false)'),
+    },
+    async ({ check_only }) => {
+      const { checkForUpdate, selfUpdate, getSystemInfo } = await import('../update.js');
+      const info = getSystemInfo();
+
+      if (check_only) {
+        const check = await checkForUpdate();
+        const text = check.updateAvailable
+          ? `Update available: ${check.current} → ${check.latest}\nRun omniwire_update to install.\n\nSystem: ${info.platform}/${info.arch} node ${info.nodeVersion}`
+          : `Up to date (${check.current})\n\nSystem: ${info.platform}/${info.arch} node ${info.nodeVersion}`;
+        return { content: [{ type: 'text', text }] };
+      }
+
+      const result = await selfUpdate();
+      return { content: [{ type: 'text', text: `${result.message}\n\nSystem: ${info.platform}/${info.arch} node ${info.nodeVersion}` }] };
     }
   );
 

@@ -15,6 +15,7 @@ import { hashBuffer, hashFile } from './hasher.js';
 import { categorizeFile } from './manifest.js';
 import { adaptPathsForNode, getToolBaseDir, isJsonFile, normalizeRelPath } from './paths.js';
 import { allNodes } from '../protocol/config.js';
+import { encrypt, decrypt, isSensitivePath, loadOrCreateKey, hasEncryptionKey } from './crypto.js';
 
 const HASH_BATCH_SIZE = 50;
 
@@ -26,20 +27,25 @@ export class SyncEngine {
     private transfer: TransferEngine,
   ) {}
 
-  // Push a local file to the database
+  // Push a local file to the database (encrypts sensitive files at rest)
   async pushFile(tool: string, relPath: string, absPath: string, opts?: { skipRemotePush?: boolean }): Promise<void> {
     const data = await readFile(absPath);
     const hash = hashBuffer(data);
+
+    // Encrypt sensitive files before storing in DB
+    const sensitive = isSensitivePath(relPath) && hasEncryptionKey();
+    const content = sensitive ? encrypt(data, loadOrCreateKey()) : data;
 
     const item = await this.db.upsertItem({
       tool,
       category: categorizeFile(relPath),
       relPath,
       contentHash: hash,
-      content: data,
+      content,
       contentSize: data.length,
       metadata: {},
       updatedByNode: this.config.nodeId,
+      encrypted: sensitive,
     });
 
     await this.db.upsertNodeSync(this.config.nodeId, item.id, hash);
@@ -55,7 +61,7 @@ export class SyncEngine {
     await this.db.logEvent(null, this.config.nodeId, 'delete', `Deleted ${tool}:${relPath}`);
   }
 
-  // Pull pending items from DB to local filesystem
+  // Pull pending items from DB to local filesystem (decrypts encrypted items)
   async pullPending(): Promise<number> {
     const pending = await this.db.getPendingItems(this.config.nodeId);
     let pulled = 0;
@@ -71,7 +77,18 @@ export class SyncEngine {
       const baseDir = getToolBaseDir(item.tool, os);
       const absPath = join(baseDir, item.relPath);
 
-      let content = item.content;
+      // Decrypt if item was stored encrypted
+      let content: Buffer;
+      if (item.encrypted && hasEncryptionKey()) {
+        try {
+          content = decrypt(item.content, loadOrCreateKey());
+        } catch {
+          // Decryption failed — key mismatch or corrupt data, skip
+          continue;
+        }
+      } else {
+        content = item.content;
+      }
 
       if (isJsonFile(item.relPath)) {
         const text = content.toString('utf-8');
@@ -218,8 +235,21 @@ export class SyncEngine {
   }
 
   // Push item content to online remote nodes in parallel via SSH2 + TransferEngine
+  // DB stores encrypted BYTEA; we decrypt here so remote nodes get plaintext over SSH (already encrypted transport)
   private async pushToRemoteNodes(item: SyncItem): Promise<void> {
     if (!item.content) return;
+
+    // Decrypt if stored encrypted — remote nodes receive plaintext over SSH2 (transport-encrypted)
+    let rawContent: Buffer;
+    if (item.encrypted && hasEncryptionKey()) {
+      try {
+        rawContent = decrypt(item.content, loadOrCreateKey());
+      } catch {
+        return; // Can't decrypt, skip push
+      }
+    } else {
+      rawContent = item.content;
+    }
 
     const onlineNodes = this.manager.getOnlineNodes().filter((id) => id !== this.config.nodeId);
 
@@ -231,7 +261,7 @@ export class SyncEngine {
         const baseDir = getToolBaseDir(item.tool, node.os);
         const remotePath = `${baseDir}/${item.relPath}`;
 
-        let content = item.content!.toString('utf-8');
+        let content = rawContent.toString('utf-8');
 
         if (isJsonFile(item.relPath)) {
           content = adaptPathsForNode(content, node.os);

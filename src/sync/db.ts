@@ -40,10 +40,11 @@ export class SyncDB {
     contentSize: number;
     metadata: Record<string, unknown>;
     updatedByNode: string;
+    encrypted?: boolean;
   }): Promise<SyncItem> {
     const { rows } = await this.pool.query(
-      `INSERT INTO sync_items (tool, category, rel_path, content_hash, content, content_size, metadata, updated_by_node, is_deleted)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false)
+      `INSERT INTO sync_items (tool, category, rel_path, content_hash, content, content_size, metadata, updated_by_node, is_deleted, encrypted)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, $9)
        ON CONFLICT (tool, rel_path) DO UPDATE SET
          content_hash = EXCLUDED.content_hash,
          content = EXCLUDED.content,
@@ -51,10 +52,11 @@ export class SyncDB {
          metadata = EXCLUDED.metadata,
          updated_at = now(),
          updated_by_node = EXCLUDED.updated_by_node,
-         is_deleted = false
+         is_deleted = false,
+         encrypted = EXCLUDED.encrypted
        WHERE sync_items.content_hash != EXCLUDED.content_hash
        RETURNING *`,
-      [item.tool, item.category, item.relPath, item.contentHash, item.content, item.contentSize, JSON.stringify(item.metadata), item.updatedByNode]
+      [item.tool, item.category, item.relPath, item.contentHash, item.content, item.contentSize, JSON.stringify(item.metadata), item.updatedByNode, item.encrypted ?? false]
     );
     // If no rows returned, item already up-to-date — fetch existing
     if (rows.length === 0) {
@@ -302,6 +304,7 @@ export class SyncDB {
       updatedAt: new Date(row.updated_at as string ?? row.updatedAt as string),
       updatedByNode: (row.updated_by_node ?? row.updatedByNode) as string,
       isDeleted: Boolean(row.is_deleted ?? row.isDeleted),
+      encrypted: Boolean(row.encrypted ?? false),
     };
   }
 }

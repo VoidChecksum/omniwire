@@ -12,6 +12,7 @@ export interface SyncItem {
   readonly updatedAt: Date;
   readonly updatedByNode: string;
   readonly isDeleted: boolean;
+  readonly encrypted: boolean;
 }
 
 export interface NodeSyncState {

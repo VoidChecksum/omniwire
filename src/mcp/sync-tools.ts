@@ -6,6 +6,8 @@ import type { SyncDB } from '../sync/db.js';
 import type { SyncEngine } from '../sync/engine.js';
 import type { ToolManifest } from '../sync/types.js';
 import { ALL_TOOLS } from '../sync/manifest.js';
+import { SecretsManager } from '../sync/secrets.js';
+import type { NodeManager } from '../nodes/manager.js';
 
 export function registerSyncTools(
   server: McpServer,
@@ -13,6 +15,7 @@ export function registerSyncTools(
   engine: SyncEngine,
   manifests: readonly ToolManifest[],
   nodeId: string,
+  manager?: NodeManager,
 ): void {
 
   // --- Tool 23: cybersync_status ---
@@ -200,6 +203,64 @@ export function registerSyncTools(
         return { content: [{ type: 'text', text: `Force pushed ${tool}:${rel_path} to all online nodes.` }] };
       } catch (err) {
         return { content: [{ type: 'text', text: `Error: ${(err as Error).message}` }] };
+      }
+    }
+  );
+
+  // --- Tool 31: omniwire_secrets ---
+  server.tool(
+    'omniwire_secrets',
+    'Manage secrets across mesh nodes. Supports 1Password, file-based, and env backends.',
+    {
+      action: z.enum(['get', 'set', 'delete', 'list', 'sync', 'status']).describe('Action to perform'),
+      key: z.string().optional().describe('Secret key (required for get/set/delete/sync)'),
+      value: z.string().optional().describe('Secret value (required for set)'),
+      nodes: z.array(z.string()).optional().describe('Target nodes for sync (all remote if omitted)'),
+      backend: z.enum(['onepassword', 'file', 'env']).optional().describe('Override secrets backend'),
+    },
+    async ({ action, key, value, nodes: targetNodes, backend }) => {
+      const secrets = new SecretsManager(backend ? { backend } : undefined);
+
+      switch (action) {
+        case 'status': {
+          const opOk = await secrets.isOnePasswordAvailable();
+          const items = await secrets.list();
+          return { content: [{ type: 'text', text: `Backend: ${secrets.backend}\n1Password CLI: ${opOk ? 'available' : 'not found'}\nSecrets stored: ${items.length}` }] };
+        }
+        case 'list': {
+          const items = await secrets.list();
+          const text = items.length === 0
+            ? 'No secrets stored'
+            : items.map((i) => `  ${i.key} ${i.updatedAt ? `(${i.updatedAt})` : ''}`).join('\n');
+          return { content: [{ type: 'text', text: `Secrets (${secrets.backend}):\n${text}` }] };
+        }
+        case 'get': {
+          if (!key) return { content: [{ type: 'text', text: 'Error: key is required' }] };
+          const val = await secrets.get(key);
+          return { content: [{ type: 'text', text: val ? `${key} = ${val}` : `${key}: not found` }] };
+        }
+        case 'set': {
+          if (!key || !value) return { content: [{ type: 'text', text: 'Error: key and value are required' }] };
+          const ok = await secrets.set(key, value);
+          return { content: [{ type: 'text', text: ok ? `Set ${key} (${secrets.backend})` : `Failed to set ${key}` }] };
+        }
+        case 'delete': {
+          if (!key) return { content: [{ type: 'text', text: 'Error: key is required' }] };
+          const ok = await secrets.delete(key);
+          return { content: [{ type: 'text', text: ok ? `Deleted ${key}` : `Failed to delete ${key}` }] };
+        }
+        case 'sync': {
+          if (!key) return { content: [{ type: 'text', text: 'Error: key is required for sync' }] };
+          if (!manager) return { content: [{ type: 'text', text: 'Error: node manager not available' }] };
+          const nodes = targetNodes ?? manager.getOnlineNodes().filter((id) => id !== nodeId);
+          const results = await secrets.syncToNodes(key, nodes, manager);
+          const text = Object.entries(results)
+            .map(([n, ok]) => `  ${n}: ${ok ? 'OK' : 'FAILED'}`)
+            .join('\n');
+          return { content: [{ type: 'text', text: `Synced ${key} to nodes:\n${text}` }] };
+        }
+        default:
+          return { content: [{ type: 'text', text: `Unknown action: ${action}` }] };
       }
     }
   );
