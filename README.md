@@ -1,100 +1,257 @@
 <p align="center">
-  <img src="https://img.shields.io/npm/v/omniwire?style=flat-square&color=0A0E14&labelColor=0A0E14&label=npm" alt="npm version" />
-  <img src="https://img.shields.io/badge/MCP-30_tools-59C2FF?style=flat-square&labelColor=0A0E14" alt="MCP tools" />
-  <img src="https://img.shields.io/badge/transport-stdio_%7C_SSE_%7C_REST-91B362?style=flat-square&labelColor=0A0E14" alt="transports" />
-  <img src="https://img.shields.io/badge/license-MIT-E6B450?style=flat-square&labelColor=0A0E14" alt="license" />
-  <img src="https://img.shields.io/badge/node-%3E%3D20-CC93E6?style=flat-square&labelColor=0A0E14" alt="node" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:0A0E14,50:1A1F2E,100:59C2FF&height=200&section=header&text=OmniWire&fontSize=72&fontColor=59C2FF&animation=fadeIn&fontAlignY=35&desc=Unified%20Mesh%20Control%20Layer&descSize=18&descColor=8B949E&descAlignY=55" />
+    <source media="(prefers-color-scheme: light)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:E8EAED,50:D4D8DE,100:59C2FF&height=200&section=header&text=OmniWire&fontSize=72&fontColor=0A0E14&animation=fadeIn&fontAlignY=35&desc=Unified%20Mesh%20Control%20Layer&descSize=18&descColor=586069&descAlignY=55" />
+    <img alt="OmniWire" src="https://capsule-render.vercel.app/api?type=waving&color=0:0A0E14,50:1A1F2E,100:59C2FF&height=200&section=header&text=OmniWire&fontSize=72&fontColor=59C2FF&animation=fadeIn&fontAlignY=35&desc=Unified%20Mesh%20Control%20Layer&descSize=18&descColor=8B949E&descAlignY=55" />
+  </picture>
 </p>
 
-<h1 align="center">OmniWire</h1>
+<p align="center">
+  <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0A0E14" alt="npm" /></a>
+  <img src="https://img.shields.io/badge/MCP-34_tools-59C2FF?style=for-the-badge&labelColor=0A0E14" alt="tools" />
+  <img src="https://img.shields.io/badge/transport-stdio_%7C_SSE_%7C_REST-91B362?style=for-the-badge&labelColor=0A0E14" alt="transports" />
+  <img src="https://img.shields.io/badge/node-%E2%89%A520-CC93E6?style=for-the-badge&logo=node.js&labelColor=0A0E14" alt="node" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-E6B450?style=for-the-badge&labelColor=0A0E14" alt="license" /></a>
+</p>
 
 <p align="center">
-  <strong>Unified mesh control layer for distributed infrastructure</strong><br/>
-  <sub>30-tool MCP server &bull; SSH2 connection pooling &bull; adaptive file transfers &bull; cross-node config sync</sub>
+  <sub>One MCP server to control all your machines. SSH2 connection pooling, adaptive file transfers, encrypted cross-node config sync.</sub>
 </p>
 
 ---
 
-OmniWire connects all your machines into a single control plane. It exposes **30 MCP tools** that any AI agent (Claude Code, OpenCode, Cursor, etc.) can use to execute commands, transfer files, manage Docker containers, and sync configurations across your entire infrastructure — through one unified interface.
+## How It Works
 
+```mermaid
+graph TB
+    subgraph clients["AI Agents"]
+        CC["Claude Code"]
+        OC["OpenCode"]
+        CU["Cursor / Any MCP Client"]
+    end
+
+    subgraph omniwire["OmniWire MCP Server"]
+        direction TB
+        MCP["MCP Protocol Layer\nstdio | SSE | REST"]
+
+        subgraph tools["34 Tools"]
+            direction LR
+            EXEC["Execution\nexec  run  batch\nbroadcast"]
+            FILES["Files\nread  write\ntransfer  deploy"]
+            MON["Monitoring\nstatus  metrics\nlogs"]
+            SYS["System\ndocker  services\nkernel"]
+            SYNC["CyberSync\nsync  diff\nsearch  secrets"]
+        end
+
+        subgraph engine["Core Engine"]
+            direction LR
+            POOL["SSH2 Pool\npersistent  compressed\ncircuit breaker"]
+            XFER["Transfer Engine\nSFTP  netcat+gzip\naria2c 16-conn"]
+            CSYNC["Sync Engine\nPostgreSQL  XChaCha20\nparallel reconcile"]
+        end
+    end
+
+    subgraph mesh["Infrastructure Mesh"]
+        direction LR
+        N1["Node A\nstorage\n10.0.0.1"]
+        N2["Node B\ncompute\n10.0.0.2"]
+        N3["Node C\nGPU\n10.0.0.3"]
+        N4["Node D\nlocal"]
+    end
+
+    DB[("PostgreSQL\nCyberSync DB")]
+
+    CC & OC & CU -->|MCP| MCP
+    MCP --> tools
+    tools --> engine
+    POOL -->|"SSH2 + zlib"| N1 & N2 & N3
+    POOL -->|"local exec"| N4
+    CSYNC --> DB
+
+    style omniwire fill:#0A0E14,stroke:#59C2FF,stroke-width:2px,color:#C6D0E1
+    style clients fill:#1A1F2E,stroke:#91B362,stroke-width:1px,color:#C6D0E1
+    style mesh fill:#1A1F2E,stroke:#E6B450,stroke-width:1px,color:#C6D0E1
+    style tools fill:#141922,stroke:#59C2FF,stroke-width:1px,color:#C6D0E1
+    style engine fill:#141922,stroke:#CC93E6,stroke-width:1px,color:#C6D0E1
+    style MCP fill:#1A1F2E,stroke:#59C2FF,color:#59C2FF
+    style DB fill:#1A1F2E,stroke:#CC93E6,color:#CC93E6
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     AI Agent (MCP Client)                    │
-│              Claude Code / OpenCode / Cursor                 │
-└──────────────────────┬───────────────────────────────────────┘
-                       │ MCP Protocol (stdio / SSE / REST)
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│                    OmniWire MCP Server                       │
-│  22 Core Tools  │  8 CyberSync Tools  │  3 Transports       │
-└──────┬──────────┴──────────┬──────────┴──────────────────────┘
-       │ SSH2 (compressed, pooled)       │ PostgreSQL
-       ▼                                 ▼
-  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌────────────┐
-  │ Node A  │  │ Node B  │  │ Node C  │  │ CyberSync  │
-  │ storage │  │ compute │  │   GPU   │  │  Database   │
-  └─────────┘  └─────────┘  └─────────┘  └────────────┘
+
+---
+
+## Features at a Glance
+
+<table>
+<tr>
+<td width="50%">
+
+### Remote Execution
+```
+omniwire_exec       single command, any node
+omniwire_run        multi-line script (compact UI)
+omniwire_batch      N commands in 1 tool call
+omniwire_broadcast  parallel across all nodes
 ```
 
-## Features
+</td>
+<td width="50%">
 
-### MCP Server — 30 Tools
+### Adaptive File Transfer
+```
+ < 10 MB   SFTP         native, 80ms
+ 10M-1GB   netcat+gzip  compressed, 200ms
+ > 1 GB    aria2c       16-parallel, max speed
+```
 
-| Category | Tools | Description |
-|----------|-------|-------------|
-| **Execution** | `omniwire_exec`, `omniwire_broadcast` | Run commands on one or all nodes |
-| **Monitoring** | `omniwire_mesh_status`, `omniwire_node_info`, `omniwire_live_monitor` | Health, latency, CPU/mem/disk |
-| **Files** | `omniwire_read_file`, `omniwire_write_file`, `omniwire_list_files`, `omniwire_find_files` | Full remote filesystem access |
-| **Transfer** | `omniwire_transfer_file`, `omniwire_deploy` | 3-mode adaptive transfer engine |
-| **System** | `omniwire_process_list`, `omniwire_disk_usage`, `omniwire_tail_log`, `omniwire_install_package` | System administration |
-| **Services** | `omniwire_service_control`, `omniwire_docker` | systemd + Docker management |
-| **Network** | `omniwire_port_forward`, `omniwire_open_browser` | SSH tunnels, remote browsers |
-| **Advanced** | `omniwire_kernel`, `omniwire_shell`, `omniwire_stream` | Kernel ops, persistent PTY, streaming |
-| **CyberSync** | `cybersync_status`, `cybersync_sync_now`, `cybersync_diff`, `cybersync_history`, `cybersync_search_knowledge`, `cybersync_get_memory`, `cybersync_manifest`, `cybersync_force_push` | Cross-node config synchronization |
+</td>
+</tr>
+<tr>
+<td>
 
-### SSH2 Connection Layer
+### Connection Resilience
+```
+Connected --> Health Ping (30s)
+    |              |
+    |         > 3s? --> Degraded warning
+    |
+Failure --> Retry (exp. backoff)
+    |         1s -> 2s -> 4s -> ... -> 30s
+    |
+3 fails --> Circuit OPEN (60s)
+                 --> Auto-recover
+```
 
-- **Persistent connection pooling** — one SSH2 connection per node, reused for all operations
-- **Zlib compression** — ~60% less data over the wire for text-heavy outputs
-- **Exponential backoff reconnect** — 1s → 2s → 4s → ... → 30s cap with jitter
-- **Circuit breaker** — 3 consecutive failures → 60s cooldown, auto-recovers
-- **2MB output guard** — prevents memory exhaustion from runaway commands
-- **Health pings** — 30s interval, detects degraded connections (>3s response)
-- **Status caching** — 5s TTL eliminates redundant probes
+</td>
+<td>
 
-### Adaptive File Transfer Engine
+### CyberSync
+```
+Node A --push--> PostgreSQL --pull--> Node B
+                     |
+              XChaCha20-Poly1305
+              encrypted at rest
 
-OmniWire automatically selects the fastest transfer mode based on file size:
+6 AI tools synced automatically:
+Claude  OpenCode  Codex  Gemini  ...
+```
 
-| Mode | Size Range | Method | Speed |
-|------|-----------|--------|-------|
-| **SFTP** | < 10 MB | SSH2 native SFTP subsystem | Zero overhead, binary-safe |
-| **netcat+tar+gzip** | 10 MB – 1 GB | Compressed TCP stream | ~70% smaller for text |
-| **aria2c** | > 1 GB | 16-connection parallel HTTP download | Saturates bandwidth |
+</td>
+</tr>
+</table>
 
-### CyberSync — Config Synchronization
+---
 
-Keeps AI tool configurations (Claude Code, OpenCode, Codex, etc.) synchronized across all your machines:
+## All 34 Tools
 
-- **6 tools tracked** — claude-code, opencode, openclaw, codex, gemini, paperclip
-- **File watching** — single chokidar instance with batch debounce
-- **Parallel sync** — pushes to all nodes simultaneously via `Promise.allSettled`
-- **Parallel hashing** — SHA-256 in 50-file batches with streaming for large files
-- **Conflict resolution** — node-ownership model with detailed conflict logging
-- **Memory bridge** — ingests Claude's `memory.db` (SQLite → PostgreSQL)
-- **Auto-reconciliation** — every 5 minutes, with event log pruning
+<details>
+<summary><b>Execution (4 tools)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_exec` | Run a command on any node. Supports `label` for compact display. |
+| `omniwire_run` | Execute multi-line scripts via temp file. Keeps tool call UI clean. |
+| `omniwire_batch` | Run N commands across nodes in a single tool call. Parallel by default. |
+| `omniwire_broadcast` | Execute on all online nodes simultaneously. |
+
+</details>
+
+<details>
+<summary><b>Monitoring (3 tools)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_mesh_status` | Health, latency, CPU/mem/disk for all nodes |
+| `omniwire_node_info` | Detailed info for a specific node |
+| `omniwire_live_monitor` | Snapshot metrics: cpu, memory, disk, network |
+
+</details>
+
+<details>
+<summary><b>Files (4 tools)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_read_file` | Read file from any node. Supports `node:/path` format. |
+| `omniwire_write_file` | Write/create file on any node |
+| `omniwire_list_files` | List directory contents |
+| `omniwire_find_files` | Search by glob pattern across all nodes |
+
+</details>
+
+<details>
+<summary><b>Transfer & Deploy (2 tools)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_transfer_file` | Copy between nodes. Auto-selects SFTP/netcat/aria2c. |
+| `omniwire_deploy` | Deploy file from one node to all others in parallel |
+
+</details>
+
+<details>
+<summary><b>System (6 tools)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_process_list` | List/filter processes across nodes |
+| `omniwire_disk_usage` | Disk usage for all nodes |
+| `omniwire_tail_log` | Last N lines of a log file |
+| `omniwire_install_package` | Install via apt/npm/pip |
+| `omniwire_service_control` | systemd start/stop/restart/status |
+| `omniwire_docker` | Run docker commands on any node |
+
+</details>
+
+<details>
+<summary><b>Network (2 tools)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_port_forward` | Create/list/close SSH tunnels |
+| `omniwire_open_browser` | Open URL in browser on a node |
+
+</details>
+
+<details>
+<summary><b>Advanced (4 tools)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_kernel` | dmesg, sysctl, modprobe, lsmod, strace, perf |
+| `omniwire_shell` | Persistent PTY session (preserves cwd/env) |
+| `omniwire_stream` | Capture streaming output (tail -f, watch) |
+| `omniwire_update` | Self-update OmniWire |
+
+</details>
+
+<details>
+<summary><b>CyberSync (9 tools)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `cybersync_status` | Sync status, item counts, pending syncs |
+| `cybersync_sync_now` | Trigger immediate reconciliation |
+| `cybersync_diff` | Show local vs database differences |
+| `cybersync_history` | Query sync event log |
+| `cybersync_search_knowledge` | Full-text search unified knowledge base |
+| `cybersync_get_memory` | Retrieve Claude memory from PostgreSQL |
+| `cybersync_manifest` | Show tracked files per tool |
+| `cybersync_force_push` | Force push file to all nodes |
+| `omniwire_secrets` | Get/set/delete/list/sync secrets (1Password, file, env) |
+
+</details>
 
 ---
 
 ## Quick Start
 
-### 1. Install
+### Install
 
 ```bash
 npm install -g omniwire
 ```
 
-### 2. Configure Your Mesh
+### Configure Mesh
 
 Create `~/.omniwire/mesh.json`:
 
@@ -106,8 +263,7 @@ Create `~/.omniwire/mesh.json`:
       "host": "10.0.0.1",
       "user": "root",
       "identityFile": "id_ed25519",
-      "role": "storage",
-      "tags": ["vps", "docker"]
+      "role": "storage"
     },
     {
       "id": "server2",
@@ -116,29 +272,11 @@ Create `~/.omniwire/mesh.json`:
       "identityFile": "id_ed25519",
       "role": "compute"
     }
-  ],
-  "meshSubnet": "10.0.0.0/24"
+  ]
 }
 ```
 
-SSH identity files are resolved relative to `~/.ssh/`. Full paths also work.
-
-### 3. Use as MCP Server
-
-Add to your AI tool's MCP config (`.mcp.json`, Claude Code settings, etc.):
-
-```json
-{
-  "mcpServers": {
-    "omniwire": {
-      "command": "node",
-      "args": ["/path/to/omniwire/dist/mcp/index.js", "--stdio"]
-    }
-  }
-}
-```
-
-Or if installed globally:
+### Add to Claude Code
 
 ```json
 {
@@ -151,100 +289,46 @@ Or if installed globally:
 }
 ```
 
-### 4. Use as Interactive Terminal
+### Interactive Mode
 
 ```bash
-omniwire
-# or
-ow
+omniwire    # or: ow
 ```
+
+---
+
+## Performance
+
+| Operation | Latency | Details |
+|-----------|---------|---------|
+| **Command exec** | `~120ms` | SSH2 + command + return |
+| **Mesh status** | `~150ms` | Parallel probes, 5s cache |
+| **File read (<1MB)** | `~80ms` | SFTP, binary-safe |
+| **Transfer (10MB)** | `~200ms` | gzip netcat over WireGuard |
+| **Config push** | `~200ms` | Parallel to all nodes |
+| **Reconcile (500 files)** | `~2s` | 50-file parallel hash batches |
+
+---
+
+## Security
+
+All remote execution uses `ssh2.Client.exec()`, never `child_process.exec()`. Key-based auth only, no passwords stored. Zlib-compressed encrypted channels. XChaCha20-Poly1305 at-rest encryption for synced configs. 2MB output guard prevents memory exhaustion. Circuit breaker isolates failing nodes.
 
 ---
 
 ## Transport Modes
 
-| Mode | Port | Use Case |
-|------|------|----------|
-| **stdio** | — | Claude Code, Cursor, any MCP subprocess client |
-| **SSE** | 3200 | OpenCode, remote HTTP-based MCP clients |
-| **REST** | 3201 | Non-MCP integrations, scripts, dashboards |
+| Mode | Default Port | Use Case |
+|------|-------------|----------|
+| `--stdio` | -- | Claude Code, Cursor, MCP subprocess clients |
+| `--sse-port=N` | 3200 | OpenCode, remote HTTP-based MCP clients |
+| `--rest-port=N` | 3201 | Scripts, dashboards, non-MCP integrations |
 
 ```bash
-# stdio (default for MCP)
-omniwire --stdio
-
-# SSE + REST (for remote/HTTP clients)
-omniwire --sse-port=3200 --rest-port=3201
-
-# Disable CyberSync (MCP-only, no PostgreSQL needed)
-omniwire --stdio --no-sync
+omniwire --stdio                          # MCP mode
+omniwire --sse-port=3200 --rest-port=3201 # HTTP mode
+omniwire --stdio --no-sync               # MCP without CyberSync
 ```
-
----
-
-## CyberSync Setup
-
-CyberSync requires PostgreSQL for the sync database. Set via environment variables:
-
-```bash
-export CYBERSYNC_PG_HOST=10.0.0.1
-export CYBERSYNC_PG_PORT=5432
-export CYBERSYNC_PG_DATABASE=cybersync
-export CYBERSYNC_PG_USER=cybersync
-export CYBERSYNC_PG_PASSWORD=your_password
-```
-
-Run the sync daemon:
-
-```bash
-# Continuous daemon (watch + reconcile every 5 min)
-omniwire sync
-
-# Single reconciliation pass
-omniwire sync:once
-
-# Ingest Claude memory.db only
-omniwire sync:ingest
-```
-
-If you don't need CyberSync, pass `--no-sync` to the MCP server — it works fine without PostgreSQL.
-
----
-
-## Configuration Reference
-
-### Mesh Config (`~/.omniwire/mesh.json`)
-
-```typescript
-interface MeshConfig {
-  nodes: Array<{
-    id: string;            // Unique node identifier
-    alias?: string;        // Short alias (e.g., "s1")
-    host: string;          // IP or hostname
-    port?: number;         // SSH port (default: 22)
-    user?: string;         // SSH user (default: "root")
-    identityFile?: string; // SSH key filename or full path
-    os?: "windows" | "linux"; // OS type (default: "linux")
-    role?: "controller" | "storage" | "compute" | "gpu+browser";
-    tags?: string[];       // Custom tags for filtering
-  }>;
-  meshSubnet?: string;     // Subnet notation (informational)
-  defaultNode?: string;    // Default target node
-}
-```
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OMNIWIRE_CONFIG` | JSON mesh config (alternative to file) | — |
-| `OMNIWIRE_NODE_ID` | Override local node ID detection | auto-detected |
-| `OMNIWIRE_LINUX_HOME` | Linux home directory for path mapping | `/root` |
-| `CYBERSYNC_PG_HOST` | PostgreSQL host | `localhost` |
-| `CYBERSYNC_PG_PORT` | PostgreSQL port | `5432` |
-| `CYBERSYNC_PG_DATABASE` | Database name | `cybersync` |
-| `CYBERSYNC_PG_USER` | Database user | `cybersync` |
-| `CYBERSYNC_PG_PASSWORD` | Database password | — |
 
 ---
 
@@ -252,53 +336,14 @@ interface MeshConfig {
 
 ```
 omniwire/
-├── src/
-│   ├── mcp/
-│   │   ├── index.ts         # Entrypoint — dual transport (stdio + SSE)
-│   │   ├── server.ts        # 22 core MCP tools
-│   │   ├── sync-tools.ts    # 8 CyberSync MCP tools
-│   │   ├── sse.ts           # SSE transport
-│   │   └── rest.ts          # REST API
-│   ├── nodes/
-│   │   ├── manager.ts       # SSH2 connection pooling + circuit breaker
-│   │   ├── transfer.ts      # 3-mode adaptive file transfer
-│   │   ├── shell.ts         # Persistent PTY sessions
-│   │   ├── tunnel.ts        # SSH port forwarding
-│   │   └── realtime.ts      # Streaming command dispatch
-│   ├── sync/
-│   │   ├── engine.ts        # Push/pull/reconcile with parallel ops
-│   │   ├── db.ts            # PostgreSQL pool (8 connections, FTS)
-│   │   ├── watcher.ts       # Single chokidar, batch debounce
-│   │   ├── hasher.ts        # SHA-256 (streaming for large files)
-│   │   ├── manifest.ts      # Tool sync definitions
-│   │   ├── memory-bridge.ts # SQLite → PostgreSQL ingestion
-│   │   └── paths.ts         # Windows/Linux path adaptation
-│   ├── protocol/
-│   │   ├── config.ts        # Mesh topology loader
-│   │   ├── types.ts         # Shared type definitions
-│   │   └── paths.ts         # node:/path format parser
-│   ├── commands/             # Interactive REPL commands
-│   ├── claude/               # Claude Code AI integration
-│   └── ui/                   # Terminal formatting
-├── mesh.example.json         # Example mesh configuration
-├── package.json
-└── tsconfig.json
+  src/
+    mcp/           MCP server (34 tools, 3 transports)
+    nodes/         SSH2 pool, transfer engine, PTY, tunnels
+    sync/          CyberSync (PostgreSQL, encryption, reconcile)
+    protocol/      Mesh config, types, path parsing
+    commands/      Interactive REPL
+    ui/            Terminal formatting
 ```
-
----
-
-## Performance
-
-Benchmarked on a 3-node WireGuard mesh (EU region):
-
-| Operation | Latency | Notes |
-|-----------|---------|-------|
-| Single command exec | ~120ms | SSH2 + command + return |
-| Mesh status (all nodes) | ~150ms | Parallel probes, 5s cache |
-| File read (< 1MB) | ~80ms | SFTP, no encoding overhead |
-| File transfer (10MB) | ~200ms | gzip netcat over WireGuard |
-| Config sync (push) | ~200ms | Parallel to all nodes |
-| Reconcile (500 files) | ~2s | 50-file parallel hash batches |
 
 ---
 
@@ -306,11 +351,19 @@ Benchmarked on a 3-node WireGuard mesh (EU region):
 
 - **Node.js** >= 20
 - **SSH access** to remote nodes (key-based auth)
-- **PostgreSQL** (only if using CyberSync)
+- **PostgreSQL** (only for CyberSync)
 - **WireGuard / VPN** recommended for mesh connectivity
 
 ---
 
-## License
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-E6B450?style=flat-square&labelColor=0A0E14" alt="MIT License" /></a>
+</p>
 
-MIT
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:0A0E14,50:1A1F2E,100:59C2FF&height=100&section=footer" />
+    <source media="(prefers-color-scheme: light)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:E8EAED,50:D4D8DE,100:59C2FF&height=100&section=footer" />
+    <img alt="footer" src="https://capsule-render.vercel.app/api?type=waving&color=0:0A0E14,50:1A1F2E,100:59C2FF&height=100&section=footer" />
+  </picture>
+</p>
