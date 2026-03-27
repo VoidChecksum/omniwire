@@ -1,4 +1,4 @@
-// OmniWire MCP Server — 30-tool universal AI agent interface (22 core + 8 CyberSync)
+// OmniWire MCP Server — 34-tool universal AI agent interface (25 core + 9 CyberSync)
 // Works with Claude Code, OpenCode, Oh-My-OpenAgent, OpenClaw, and any MCP client
 //
 // SECURITY NOTE: This file does NOT use child_process.exec(). All remote command
@@ -19,7 +19,7 @@ import { parseMeshPath } from '../protocol/paths.js';
 export function createOmniWireServer(manager: NodeManager, transfer: TransferEngine): McpServer {
   const server = new McpServer({
     name: 'omniwire',
-    version: '2.0.0',
+    version: '2.2.0',
   });
 
   const shells = new ShellManager(manager);
@@ -31,19 +31,31 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     'omniwire_exec',
     'Execute a command on a specific mesh node. Defaults to auto-selecting based on command context.',
     {
-      node: z.string().optional().describe('Target node id. Auto-selects if omitted.'),
+      node: z.string().optional().describe('Target node id Auto-selects if omitted.'),
       command: z.string().describe('Shell command to run on the remote node via SSH'),
       timeout: z.number().optional().describe('Timeout in seconds (default 30)'),
+      script: z.string().optional().describe('Multi-line script content. Sent as temp file via SFTP then executed. Use this instead of command for scripts >3 lines to keep tool calls compact.'),
+      label: z.string().optional().describe('Short label for the operation (shown in tool call UI instead of full command). Max 60 chars.'),
     },
     // Remote SSH2 execution — manager.exec() uses ssh2 client.exec(), not child_process
-    async ({ node, command, timeout }) => {
+    async ({ node, command, timeout, script, label }) => {
       const nodeId = node ?? getDefaultNodeForTask('storage');
       const timeoutSec = timeout ?? 30;
-      // Wrap with remote timeout (runs on remote node via SSH2)
-      const wrappedCmd = timeoutSec < 300
-        ? `timeout ${timeoutSec} bash -c '${command.replace(/'/g, "'\\''")}'`
-        : command;
-      const result = await manager.exec(nodeId, wrappedCmd);
+
+      let effectiveCmd: string;
+
+      if (script) {
+        // Multi-line script: write to temp file via SSH, execute, clean up
+        const tmpFile = `/tmp/.ow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const escaped = script.replace(/'/g, "'\\''");
+        effectiveCmd = `cat << 'OMNIWIRE_SCRIPT_EOF' > ${tmpFile}\n${script}\nOMNIWIRE_SCRIPT_EOF\nchmod +x ${tmpFile} && ${tmpFile}; _rc=$?; rm -f ${tmpFile}; exit $_rc`;
+      } else {
+        effectiveCmd = timeoutSec < 300
+          ? `timeout ${timeoutSec} bash -c '${command.replace(/'/g, "'\\''")}'`
+          : command;
+      }
+
+      const result = await manager.exec(nodeId, effectiveCmd);
       const output = result.code === 0
         ? result.stdout || '(no output)'
         : result.code === 124
@@ -357,7 +369,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     'Run docker commands on a node. Default: storage node.',
     {
       command: z.string().describe('Docker subcommand (ps, run, logs, images, etc.)'),
-      node: z.string().optional().describe('Node id (default: storage node)'),
+      node: z.string().optional().describe('Node id (default: contabo)'),
     },
     async ({ command, node }) => {
       const nodeId = node ?? getDefaultNodeForTask('storage');
@@ -370,10 +382,10 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
   // --- Tool 16: omniwire_open_browser ---
   server.tool(
     'omniwire_open_browser',
-    'Open a URL in a browser. Default: gpu+browser node.',
+    'Open a URL in a browser. Default: thinkpad (has GPU + display).',
     {
       url: z.string().describe('URL to open'),
-      node: z.string().optional().describe('Node to open on (default: gpu+browser node)'),
+      node: z.string().optional().describe('Node to open on (default: thinkpad)'),
     },
     async ({ url, node }) => {
       const result = await openBrowser(manager, url, node);
@@ -546,7 +558,88 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     }
   );
 
-  // --- Tool 23: omniwire_update ---
+  // --- Tool 23: omniwire_run (compact multi-line script execution) ---
+  server.tool(
+    'omniwire_run',
+    'Execute a multi-line script on a node. The script is written to a temp file and executed, keeping tool call display compact. Use this instead of omniwire_exec for Python scripts, heredocs, or any command >3 lines.',
+    {
+      node: z.string().optional().describe('Target node id. Default: storage node.'),
+      interpreter: z.enum(['bash', 'python3', 'python', 'node', 'sh']).optional().describe('Script interpreter (default: bash)'),
+      script: z.string().describe('Script content (multi-line)'),
+      label: z.string().optional().describe('Short description shown in tool call UI (max 60 chars)'),
+      timeout: z.number().optional().describe('Timeout in seconds (default 30)'),
+      env: z.record(z.string(), z.string()).optional().describe('Environment variables to set'),
+    },
+    async ({ node, interpreter, script, label, timeout, env }) => {
+      const nodeId = node ?? getDefaultNodeForTask('storage');
+      const interp = interpreter ?? 'bash';
+      const timeoutSec = timeout ?? 30;
+      const tmpFile = `/tmp/.ow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      // Build env prefix
+      const envPrefix = env
+        ? Object.entries(env).map(([k, v]: [string, string]) => `export ${k}='${v.replace(/'/g, "'\\''")}'`).join('; ') + '; '
+        : '';
+
+      // Write script via heredoc, execute with interpreter, clean up
+      const wrappedCmd = [
+        `cat << 'OMNIWIRE_EOF' > ${tmpFile}`,
+        script,
+        'OMNIWIRE_EOF',
+        `chmod +x ${tmpFile}`,
+        `${envPrefix}timeout ${timeoutSec} ${interp} ${tmpFile}`,
+        `_rc=$?; rm -f ${tmpFile}; exit $_rc`,
+      ].join('\n');
+
+      const result = await manager.exec(nodeId, wrappedCmd);
+      const displayLabel = label ? ` (${label})` : '';
+      const output = result.code === 0
+        ? result.stdout || '(no output)'
+        : result.code === 124
+          ? `Timeout after ${timeoutSec}s: ${result.stdout || '(no output)'}`
+          : `Error (exit ${result.code}): ${result.stderr}`;
+      return { content: [{ type: 'text', text: `[${nodeId}]${displayLabel} (${result.durationMs}ms)\n${output}` }] };
+    }
+  );
+
+  // --- Tool 25: omniwire_batch (multiple commands, single tool call) ---
+  server.tool(
+    'omniwire_batch',
+    'Run multiple commands on one or more nodes in a single tool call. Returns all results. Use this to avoid multiple sequential omniwire_exec calls.',
+    {
+      commands: z.array(z.object({
+        node: z.string().optional().describe('Node id (default: contabo)'),
+        command: z.string().describe('Command to run'),
+        label: z.string().optional().describe('Short label for this command'),
+      })).describe('Array of commands to execute'),
+      parallel: z.boolean().optional().describe('Run all commands in parallel (default: true)'),
+    },
+    async ({ commands, parallel }) => {
+      const runParallel = parallel !== false;
+
+      const execute = async (item: { node?: string; command: string; label?: string }) => {
+        const nodeId = item.node ?? 'contabo';
+        const result = await manager.exec(nodeId, item.command);
+        const lbl = item.label ? ` ${item.label}` : '';
+        const output = result.code === 0
+          ? result.stdout || '(no output)'
+          : `Error (exit ${result.code}): ${result.stderr}`;
+        return `[${nodeId}]${lbl} (${result.durationMs}ms)\n${output}`;
+      };
+
+      const results = runParallel
+        ? await Promise.all(commands.map(execute))
+        : await commands.reduce<Promise<string[]>>(async (acc, cmd) => {
+            const prev = await acc;
+            const result = await execute(cmd);
+            return [...prev, result];
+          }, Promise.resolve([]));
+
+      return { content: [{ type: 'text', text: results.join('\n\n') }] };
+    }
+  );
+
+  // --- Tool 26: omniwire_update ---
   server.tool(
     'omniwire_update',
     'Check for updates and self-update OmniWire to the latest version.',

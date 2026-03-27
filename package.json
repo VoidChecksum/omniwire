@@ -1,6 +1,6 @@
 {
   "name": "omniwire",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Unified mesh control layer — 30-tool MCP server for managing SSH nodes, file transfers, and config sync across distributed infrastructure",
   "type": "module",
   "license": "MIT",
