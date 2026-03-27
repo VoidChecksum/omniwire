@@ -127,12 +127,16 @@ Failure --> Multi-path Failover
 </td>
 <td>
 
-### CyberSync
+### CyberSync + CyberBase
 ```
-Node A --push--> PostgreSQL --pull--> Node B
+Node A --push--> PostgreSQL (cyberbase)
+    |                 |
+    |            XChaCha20-Poly1305
+    |            encrypted at rest
+    |
+    +--mirror--> Obsidian Vault
                      |
-              XChaCha20-Poly1305
-              encrypted at rest
+                Obsidian Sync (cloud)
 
 6 AI tools synced automatically:
 Claude  OpenCode  Codex  Gemini  ...
@@ -308,14 +312,14 @@ omniwire    # or: ow
 | **Mesh status** | `~150ms` | Parallel probes, 8s cache |
 | **File read (<1MB)** | `~80ms` | SFTP, binary-safe |
 | **Transfer (10MB)** | `~200ms` | gzip netcat over WireGuard |
-| **Config push** | `~200ms` | Parallel to all nodes |
+| **Config push** | `~200ms` | Parallel to all nodes + Obsidian mirror |
 | **Reconcile (500 files)** | `~1.2s` | 100-file hash batches, parallel walkDir |
 
 ---
 
 ## Security
 
-All remote execution uses `ssh2.Client.exec()`, never `child_process.exec()`. Key-based auth only, no passwords stored. Multi-path failover (WireGuard → Tailscale → Public IP) with SSH key caching. XChaCha20-Poly1305 at-rest encryption for synced configs. 2MB output guard prevents memory exhaustion. Circuit breaker with 30s auto-recovery isolates failing nodes.
+All remote execution uses `ssh2.Client.exec()`, never `child_process.exec()`. Key-based auth only, no passwords stored. Multi-path failover (WireGuard → Tailscale → Public IP) with SSH key caching. CyberBase: single PostgreSQL DB for all projects. XChaCha20-Poly1305 at-rest encryption for synced configs. 2MB output guard prevents memory exhaustion. Circuit breaker with 30s auto-recovery isolates failing nodes.
 
 ---
 
@@ -364,6 +368,13 @@ omniwire --stdio --no-sync               # MCP without CyberSync
 - `node_info` shows which host path is active (WG/Tailscale/Public)
 - `exec` and `run` use `label` field as display tag
 
+**CyberBase Integration**
+- Renamed PostgreSQL database from `cybersync` to `cyberbase` (single DB for everything)
+- VaultBridge: mirrors all sync items, knowledge, and memory to Obsidian-compatible markdown
+- Obsidian vault at `~/Documents/BuisnessProjects/CyberBase` with Obsidian Sync for cloud backup
+- Daily event logs in `vault/logs/`
+- `obsidian-mcp` deployed on all mesh nodes for AI vault access
+
 ---
 
 ## Architecture
@@ -373,7 +384,7 @@ omniwire/
   src/
     mcp/           MCP server (34 tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
-    sync/          CyberSync (PostgreSQL, encryption, reconcile)
+    sync/          CyberSync + CyberBase (PostgreSQL, Obsidian vault, encryption)
     protocol/      Mesh config, types, path parsing
     commands/      Interactive REPL
     ui/            Terminal formatting
@@ -387,6 +398,7 @@ omniwire/
 - **SSH access** to remote nodes (key-based auth)
 - **PostgreSQL** (only for CyberSync)
 - **WireGuard + Tailscale** recommended (multi-path failover uses both)
+- **Obsidian** (optional) for CyberBase vault browsing + Obsidian Sync cloud backup
 
 ---
 
