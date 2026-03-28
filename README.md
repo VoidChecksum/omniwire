@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0A0E14" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP-34_tools-59C2FF?style=for-the-badge&labelColor=0A0E14" alt="tools" />
+  <img src="https://img.shields.io/badge/MCP-40_tools-59C2FF?style=for-the-badge&labelColor=0A0E14" alt="tools" />
   <img src="https://img.shields.io/badge/transport-stdio_%7C_SSE_%7C_REST-91B362?style=for-the-badge&labelColor=0A0E14" alt="transports" />
   <img src="https://img.shields.io/badge/node-%E2%89%A520-CC93E6?style=for-the-badge&logo=node.js&labelColor=0A0E14" alt="node" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-E6B450?style=for-the-badge&labelColor=0A0E14" alt="license" /></a>
@@ -34,7 +34,7 @@ graph TB
         direction TB
         MCP["MCP Protocol Layer\nstdio | SSE | REST"]
 
-        subgraph tools["34 Tools"]
+        subgraph tools["40 Tools"]
             direction LR
             EXEC["Execution\nexec  run  batch\nbroadcast"]
             FILES["Files\nread  write\ntransfer  deploy"]
@@ -110,9 +110,9 @@ omniwire_broadcast  parallel across all nodes
 
 ### Connection Resilience
 ```
-Connected --> Health Ping (45s)
+Connected --> Health Ping (30s, parallel)
     |              |
-    |         > 5s? --> Degraded warning
+    |         > 3s? --> Degraded warning
     |
 Failure --> Multi-path Failover
     |         WireGuard --> Tailscale --> Public IP
@@ -120,7 +120,7 @@ Failure --> Multi-path Failover
     +--> Retry (exp. backoff)
     |         500ms -> 1s -> 2s -> ... -> 15s
     |
-3 fails --> Circuit OPEN (30s)
+3 fails --> Circuit OPEN (20s)
                  --> Auto-recover
 ```
 
@@ -148,7 +148,7 @@ Claude  OpenCode  Codex  Gemini  ...
 
 ---
 
-## All 34 Tools
+## All 40 Tools
 
 <details>
 <summary><b>Execution (4 tools)</b></summary>
@@ -232,6 +232,20 @@ Claude  OpenCode  Codex  Gemini  ...
 </details>
 
 <details>
+<summary><b>DevOps (6 tools) — NEW in v2.3.0</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_cron` | List/add/remove cron jobs on any node |
+| `omniwire_env` | Get/set/list environment variables (persistent via /etc/environment) |
+| `omniwire_network` | Network diagnostics: ping, traceroute, dns, ports, speed, connections |
+| `omniwire_clipboard` | Shared clipboard buffer across all mesh nodes |
+| `omniwire_git` | Run git commands on repos on any node |
+| `omniwire_syslog` | Query journalctl with unit/priority/time filters |
+
+</details>
+
+<details>
 <summary><b>CyberSync (9 tools)</b></summary>
 
 | Tool | Description |
@@ -309,7 +323,7 @@ omniwire    # or: ow
 | Operation | Latency | Details |
 |-----------|---------|---------|
 | **Command exec** | `~120ms` | SSH2 + command + return |
-| **Mesh status** | `~150ms` | Parallel probes, 8s cache |
+| **Mesh status** | `~150ms` | Parallel probes, 5s cache |
 | **File read (<1MB)** | `~80ms` | SFTP, binary-safe |
 | **Transfer (10MB)** | `~200ms` | gzip netcat over WireGuard |
 | **Config push** | `~200ms` | Parallel to all nodes + Obsidian mirror |
@@ -319,7 +333,7 @@ omniwire    # or: ow
 
 ## Security
 
-All remote execution uses `ssh2.Client.exec()`, never `child_process.exec()`. Key-based auth only, no passwords stored. Multi-path failover (WireGuard → Tailscale → Public IP) with SSH key caching. CyberBase: single PostgreSQL DB for all projects. XChaCha20-Poly1305 at-rest encryption for synced configs. 2MB output guard prevents memory exhaustion. Circuit breaker with 30s auto-recovery isolates failing nodes.
+All remote execution uses `ssh2.Client.exec()`, never `child_process.exec()`. Key-based auth only, no passwords stored. Multi-path failover (WireGuard → Tailscale → Public IP) with SSH key caching. CyberBase: single PostgreSQL DB for all projects. XChaCha20-Poly1305 at-rest encryption for synced configs. 2MB output guard prevents memory exhaustion. Circuit breaker with 20s auto-recovery isolates failing nodes. Output auto-truncated at 4KB to prevent context bloat in AI agents.
 
 ---
 
@@ -340,6 +354,39 @@ omniwire --stdio --no-sync               # MCP without CyberSync
 ---
 
 ## Changelog
+
+### v2.3.0 — Compact Output, Speed, New Tools
+
+**Output Overhaul**
+- Complete rewrite of MCP output formatting — compact, scannable, AI-agent optimized
+- Auto-truncation at 4KB prevents context window bloat
+- Smart time formatting: `342ms` for fast, `2.1s` for slow ops
+- Multi-node results use `--` separator with per-node status markers
+- One-liner responses for write/install/deploy/tunnel operations
+- Mesh status now tabular with `+`/`-` online indicators
+- Human-readable file sizes in transfer results (`1.2MB` not bytes)
+- Error prefix standardized to `ERR` for quick scanning
+- `label` parameter now used as primary display in all exec-type tools
+
+**Performance**
+- Health pings now parallel (`Promise.allSettled`) instead of serial loop
+- Keepalive interval: 3s (was 5s) — faster dead connection detection
+- Keepalive max retries: 2 (was 3) — 6s detection vs 15s
+- Status cache TTL: 5s (was 8s) — fresher data
+- Circuit breaker recovery: 20s (was 30s) — faster node recovery
+- Connection timeout: 6s (was 8s) — faster failover
+- Transfer netcat sleep: 100ms (was 200ms)
+- Transfer aria2c sleep: 250ms (was 500ms)
+
+**6 New Tools (34 → 40)**
+- `omniwire_cron` — manage cron jobs (list/add/remove) on any node
+- `omniwire_env` — get/set/list persistent environment variables
+- `omniwire_network` — diagnostics: ping, traceroute, dns, ports, speed, connections
+- `omniwire_clipboard` — shared clipboard buffer across all mesh nodes
+- `omniwire_git` — run git commands on repos on any node
+- `omniwire_syslog` — query journalctl with unit/priority/time filters
+
+---
 
 ### v2.2.1 — Security & Bug Fixes
 
@@ -405,7 +452,7 @@ omniwire --stdio --no-sync               # MCP without CyberSync
 ```
 omniwire/
   src/
-    mcp/           MCP server (34 tools, 3 transports)
+    mcp/           MCP server (40 tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
     sync/          CyberSync + CyberBase (PostgreSQL, Obsidian vault, encryption)
     protocol/      Mesh config, types, path parsing

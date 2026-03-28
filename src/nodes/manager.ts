@@ -20,10 +20,11 @@ interface NodeConnection {
 type ReconnectCallback = (nodeId: string) => void;
 
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024; // 2MB output guard
-const STATUS_CACHE_TTL = 8000;             // 8s status cache (reduced SSH round-trips)
-const HEALTH_PING_INTERVAL = 45_000;       // 45s health pings (less overhead)
-const CIRCUIT_OPEN_DURATION = 30_000;      // 30s circuit breaker (recover faster)
+const STATUS_CACHE_TTL = 5000;             // 5s status cache
+const HEALTH_PING_INTERVAL = 30_000;       // 30s health pings
+const CIRCUIT_OPEN_DURATION = 20_000;      // 20s circuit breaker (recover faster)
 const CIRCUIT_FAILURE_THRESHOLD = 3;
+const CONNECT_TIMEOUT = 6000;              // 6s connection timeout
 
 export class NodeManager {
   private connections: Map<string, NodeConnection> = new Map();
@@ -86,7 +87,7 @@ export class NodeManager {
       const timeout = setTimeout(() => {
         client.end();
         reject(new Error(`Connection to ${node.id} timed out`));
-      }, 8000);
+      }, CONNECT_TIMEOUT);
 
       client.on('ready', () => {
         clearTimeout(timeout);
@@ -114,11 +115,11 @@ export class NodeManager {
         port: node.port,
         username: node.user,
         privateKey: this.getKey(node.identityFile),
-        readyTimeout: 8000,
-        keepaliveInterval: 5000,
-        keepaliveCountMax: 3,
+        readyTimeout: CONNECT_TIMEOUT,
+        keepaliveInterval: 3000,
+        keepaliveCountMax: 2,
         algorithms: {
-          compress: ['none'],  // no compression � faster for small commands
+          compress: ['none'],  // no compression � faster for small commands
         },
       };
 
@@ -405,18 +406,20 @@ export class NodeManager {
     });
   }
 
-  // Periodic health ping — verifies end-to-end SSH responsiveness
+  // Periodic health ping — parallel pings to all nodes
   private startHealthPing(): void {
-    this.healthTimer = setInterval(async () => {
-      for (const [nodeId, conn] of this.connections) {
-        if (!conn.connected || conn.circuitOpenUntil > Date.now()) continue;
-        const start = Date.now();
-        const result = await this.exec(nodeId, 'true');
-        const elapsed = Date.now() - start;
-        if (elapsed > 3000 || result.code !== 0) {
-          process.stderr.write(`[health] ${nodeId} degraded (${elapsed}ms, code=${result.code})\n`);
-        }
-      }
+    this.healthTimer = setInterval(() => {
+      const pings = [...this.connections.entries()]
+        .filter(([, conn]) => conn.connected && conn.circuitOpenUntil <= Date.now())
+        .map(async ([nodeId]) => {
+          const start = Date.now();
+          const result = await this.exec(nodeId, 'true');
+          const elapsed = Date.now() - start;
+          if (elapsed > 3000 || result.code !== 0) {
+            process.stderr.write(`[health] ${nodeId} degraded (${elapsed}ms)\n`);
+          }
+        });
+      Promise.allSettled(pings);
     }, HEALTH_PING_INTERVAL);
   }
 

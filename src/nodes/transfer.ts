@@ -87,8 +87,8 @@ export class TransferEngine {
     const receiverCmd = `timeout 30 bash -c 'nc -l -p ${port} | tar xzf - -C "${dstDir}"'`;
     const receiverPromise = this.manager.exec(dstNode, `mkdir -p "${dstDir}" && ${receiverCmd}`);
 
-    // Small delay to ensure receiver is listening
-    await new Promise((r) => setTimeout(r, 200));
+    // Brief delay for receiver to bind port
+    await new Promise((r) => setTimeout(r, 100));
 
     // Start sender — gzip compressed
     const senderCmd = isDirectory
@@ -121,7 +121,7 @@ export class TransferEngine {
     // Start HTTP server on source (background, auto-kill after transfer)
     const serverCmd = `cd "${srcDir}" && timeout 300 python3 -m http.server ${port} --bind 0.0.0.0 &`;
     await this.manager.exec(srcNode, `bash -c '${serverCmd}'`);
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 250));
 
     try {
       const downloadCmd = `mkdir -p "${dstDir}" && aria2c -x16 -s16 --allow-overwrite=true -d "${dstDir}" -o "${fileName}" "http://${srcIp}:${port}/${fileName}" 2>&1`;

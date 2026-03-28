@@ -1,4 +1,4 @@
-// OmniWire MCP Server â 34-tool universal AI agent interface (25 core + 9 CyberSync)
+// OmniWire MCP Server -- 34-tool universal AI agent interface (25 core + 9 CyberSync)
 // Works with Claude Code, OpenCode, Oh-My-OpenAgent, OpenClaw, and any MCP client
 //
 // SECURITY NOTE: This file does NOT use child_process.exec(). All remote command
@@ -16,21 +16,54 @@ import { openBrowser } from '../commands/browser.js';
 import { allNodes, remoteNodes, findNode, NODE_ROLES, getDefaultNodeForTask } from '../protocol/config.js';
 import { parseMeshPath } from '../protocol/paths.js';
 
-// Compact output helpers  keeps Claude Code tool results clean
-function ok(node: string, ms: number, body: string, label?: string): { content: [{ type: 'text'; text: string }] } {
-  const tag = label ?? node;
-  return { content: [{ type: 'text' as const, text: `[${tag}] (${ms}ms)
-${body}` }] };
+// -- Output helpers -- compact, scannable output for AI agents ----------------
+type McpResult = { content: [{ type: 'text'; text: string }] };
+
+const MAX_OUTPUT = 4000;
+
+function t(ms: number): string {
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
-function fail(msg: string): { content: [{ type: 'text'; text: string }] } {
+function trim(s: string): string {
+  return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + '\n...(truncated)' : s;
+}
+
+function ok(node: string, ms: number, body: string, label?: string): McpResult {
+  const hdr = label ? `${node} > ${label}` : node;
+  return { content: [{ type: 'text' as const, text: `${hdr}  ${t(ms)}\n${trim(body)}` }] };
+}
+
+function okBrief(msg: string): McpResult {
   return { content: [{ type: 'text' as const, text: msg }] };
 }
+
+function fail(msg: string): McpResult {
+  return { content: [{ type: 'text' as const, text: `ERR ${msg}` }] };
+}
+
+function fmtExecOutput(result: { code: number; stdout: string; stderr: string }, timeoutSec: number): string {
+  if (result.code === 0) return result.stdout || '(empty)';
+  if (result.code === 124) return `TIMEOUT ${timeoutSec}s\n${result.stdout || '(empty)'}`;
+  return `exit ${result.code}\n${result.stderr}`;
+}
+
+function multiResult(results: { nodeId: string; code: number; stdout: string; stderr: string; durationMs: number }[]): McpResult {
+  const parts = results.map((r) => {
+    const mark = r.code === 0 ? 'ok' : `exit ${r.code}`;
+    const body = r.code === 0
+      ? (r.stdout || '(empty)').split('\n').slice(0, 30).join('\n')
+      : r.stderr.split('\n').slice(0, 10).join('\n');
+    return `-- ${r.nodeId}  ${t(r.durationMs)}  ${mark}\n${body}`;
+  });
+  return okBrief(trim(parts.join('\n\n')));
+}
+// -----------------------------------------------------------------------------
 
 export function createOmniWireServer(manager: NodeManager, transfer: TransferEngine): McpServer {
   const server = new McpServer({
     name: 'omniwire',
-    version: '2.2.1',
+    version: '2.3.0',
   });
 
   const shells = new ShellManager(manager);
@@ -48,10 +81,10 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       script: z.string().optional().describe('Multi-line script content. Sent as temp file via SFTP then executed. Use this instead of command for scripts >3 lines to keep tool calls compact.'),
       label: z.string().optional().describe('Short label for the operation (shown in tool call UI instead of full command). Max 60 chars.'),
     },
-    // Remote SSH2 execution â manager.exec() uses ssh2 client.exec(), not child_process
+    // Remote SSH2 execution -- manager.exec() uses ssh2 client.exec(), not child_process
     async ({ node, command, timeout, script, label }) => {
       if (!command && !script) {
-        return fail('Error: either command or script is required');
+        return fail('either command or script is required');
       }
       const nodeId = node ?? 'contabo';
       const timeoutSec = timeout ?? 30;
@@ -59,7 +92,6 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       let effectiveCmd: string;
 
       if (script) {
-        // Multi-line script: write to temp file via SSH, execute, clean up
         const tmpFile = `/tmp/.ow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         effectiveCmd = `cat << 'OMNIWIRE_SCRIPT_EOF' > ${tmpFile}\n${script}\nOMNIWIRE_SCRIPT_EOF\nchmod +x ${tmpFile} && timeout ${timeoutSec} ${tmpFile}; _rc=$?; rm -f ${tmpFile}; exit $_rc`;
       } else {
@@ -69,12 +101,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       }
 
       const result = await manager.exec(nodeId, effectiveCmd);
-      const output = result.code === 0
-        ? result.stdout || '(no output)'
-        : result.code === 124
-          ? `Timeout after ${timeoutSec}s: ${result.stdout || '(no output)'}`
-          : `Error (exit ${result.code}): ${result.stderr}`;
-      return ok(nodeId, result.durationMs, output, label ?? undefined);
+      return ok(nodeId, result.durationMs, fmtExecOutput(result, timeoutSec), label ?? undefined);
     }
   );
 
@@ -90,11 +117,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       const results = targetNodes
         ? await manager.execOn(targetNodes, command)
         : await manager.execAll(command);
-      const text = results.map((r) => {
-        const body = r.code === 0 ? r.stdout || '(no output)' : `Error: ${r.stderr}`;
-        return `[${r.nodeId}] (${r.durationMs}ms)\n${body}`;
-      }).join('\n\n');
-      return { content: [{ type: 'text', text }] };
+      return multiResult(results);
     }
   );
 
@@ -106,15 +129,14 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     async () => {
       const statuses = await manager.getAllStatus();
       const lines = statuses.map((s) => {
-        const node = allNodes().find((n) => n.id === s.nodeId);
-        const role = NODE_ROLES[s.nodeId] ?? 'unknown';
-        const status = s.online ? 'ONLINE' : 'OFFLINE';
-        const lat = s.latencyMs !== null ? `${s.latencyMs}ms` : '-';
-        const mem = s.memUsedPct !== null ? `${s.memUsedPct.toFixed(0)}%` : '-';
-        const disk = s.diskUsedPct !== null ? `${s.diskUsedPct.toFixed(0)}%` : '-';
-        return `${s.nodeId} (${role}) | ${node?.host ?? '-'} | ${status} | lat=${lat} | load=${s.loadAvg ?? '-'} | mem=${mem} | disk=${disk}`;
+        const status = s.online ? '+' : '-';
+        const lat = s.latencyMs !== null ? `${s.latencyMs}ms` : '--';
+        const mem = s.memUsedPct !== null ? `${s.memUsedPct.toFixed(0)}%` : '--';
+        const disk = s.diskUsedPct !== null ? `${s.diskUsedPct.toFixed(0)}%` : '--';
+        const role = NODE_ROLES[s.nodeId] ?? '';
+        return `${status} ${s.nodeId.padEnd(10)} ${role.padEnd(8)} lat=${lat.padStart(5)}  mem=${mem.padStart(4)}  disk=${disk.padStart(4)}  load=${s.loadAvg ?? '--'}`;
       });
-      return { content: [{ type: 'text', text: lines.join('\n') }] };
+      return okBrief(lines.join('\n'));
     }
   );
 
@@ -125,23 +147,15 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     { node: z.string().describe('Node id') },
     async ({ node }) => {
       const meshNode = findNode(node);
-      if (!meshNode) return { content: [{ type: 'text', text: `Unknown node: ${node}` }] };
-      const status = await manager.getNodeStatus(meshNode.id);
-      const role = NODE_ROLES[meshNode.id] ?? 'unknown';
-      const text = [
-        `Node: ${meshNode.id} (${meshNode.alias})`,
-        `Role: ${role}`,
-        `Host: ${meshNode.host}:${meshNode.port}`,
-        `OS: ${meshNode.os}`,
-        `Tags: ${meshNode.tags.join(', ')}`,
-        `Status: ${status.online ? 'ONLINE' : 'OFFLINE'}`,
-        `Latency: ${status.latencyMs ?? '-'}ms`,
-        `Uptime: ${status.uptime ?? '-'}`,
-        `Load: ${status.loadAvg ?? '-'}`,
-        `Memory: ${status.memUsedPct !== null ? `${status.memUsedPct.toFixed(1)}%` : '-'}`,
-        `Disk: ${status.diskUsedPct !== null ? `${status.diskUsedPct.toFixed(0)}%` : '-'}`,
-      ].join('\n');
-      return { content: [{ type: 'text', text }] };
+      if (!meshNode) return fail(`unknown node: ${node}`);
+      const s = await manager.getNodeStatus(meshNode.id);
+      const role = NODE_ROLES[meshNode.id] ?? '';
+      const status = s.online ? 'ONLINE' : 'OFFLINE';
+      const text = `${meshNode.id} (${meshNode.alias})  ${status}
+role=${role}  host=${meshNode.host}:${meshNode.port}  os=${meshNode.os}
+lat=${s.latencyMs ?? '--'}ms  up=${s.uptime ?? '--'}  load=${s.loadAvg ?? '--'}  mem=${s.memUsedPct !== null ? `${s.memUsedPct.toFixed(1)}%` : '--'}  disk=${s.diskUsedPct !== null ? `${s.diskUsedPct.toFixed(0)}%` : '--'}
+tags: ${meshNode.tags.join(', ')}`;
+      return okBrief(text);
     }
   );
 
@@ -165,9 +179,9 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         if (max_lines) {
           content = content.split('\n').slice(0, max_lines).join('\n');
         }
-        return { content: [{ type: 'text', text: content }] };
+        return okBrief(trim(content));
       } catch (e) {
-        return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }] };
+        return fail((e as Error).message);
       }
     }
   );
@@ -189,9 +203,9 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
 
       try {
         await transfer.writeFile(nodeId, filePath, content);
-        return { content: [{ type: 'text', text: `Written ${filePath} on ${nodeId}` }] };
+        return okBrief(`${nodeId}:${filePath} written`);
       } catch (e) {
-        return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }] };
+        return fail((e as Error).message);
       }
     }
   );
@@ -208,18 +222,21 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     async ({ src, dst, mode }) => {
       const srcParsed = parseMeshPath(src);
       const dstParsed = parseMeshPath(dst);
-      if (!srcParsed) return { content: [{ type: 'text', text: `Invalid source path: ${src}. Use node:/path format.` }] };
-      if (!dstParsed) return { content: [{ type: 'text', text: `Invalid dest path: ${dst}. Use node:/path format.` }] };
+      if (!srcParsed) return fail(`invalid source: ${src} (use node:/path)`);
+      if (!dstParsed) return fail(`invalid dest: ${dst} (use node:/path)`);
 
       try {
-        const result = await transfer.transfer(
+        const r = await transfer.transfer(
           srcParsed.nodeId, srcParsed.path,
           dstParsed.nodeId, dstParsed.path,
           mode ? { mode } : undefined
         );
-        return { content: [{ type: 'text', text: `Transferred ${result.bytesTransferred} bytes via ${result.mode} in ${result.durationMs}ms (${result.speedMBps.toFixed(1)} MB/s)` }] };
+        const size = r.bytesTransferred > 1048576
+          ? `${(r.bytesTransferred / 1048576).toFixed(1)}MB`
+          : `${(r.bytesTransferred / 1024).toFixed(0)}KB`;
+        return okBrief(`${srcParsed.nodeId} -> ${dstParsed.nodeId}  ${size} via ${r.mode}  ${t(r.durationMs)}  ${r.speedMBps.toFixed(1)}MB/s`);
       } catch (e) {
-        return { content: [{ type: 'text', text: `Transfer error: ${(e as Error).message}` }] };
+        return fail((e as Error).message);
       }
     }
   );
@@ -243,9 +260,9 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         const text = entries.map((e) =>
           `${e.isDirectory ? 'd' : '-'} ${e.permissions.padEnd(11)} ${String(e.size).padStart(10)} ${e.modified} ${e.name}`
         ).join('\n');
-        return { content: [{ type: 'text', text: text || '(empty directory)' }] };
+        return okBrief(trim(text || '(empty)'));
       } catch (e) {
-        return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }] };
+        return fail((e as Error).message);
       }
     }
   );
@@ -271,11 +288,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         ? await manager.execOn(targetNodes, cmd)
         : await manager.execAll(cmd);
 
-      const text = results.map((r) => {
-        const body = r.code === 0 ? r.stdout || '(no matches)' : `Error: ${r.stderr}`;
-        return `[${r.nodeId}]\n${body}`;
-      }).join('\n\n');
-      return { content: [{ type: 'text', text }] };
+      return multiResult(results);
     }
   );
 
@@ -291,8 +304,8 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     async ({ path, node, lines }) => {
       const n = lines ?? 50;
       const result = await manager.exec(node, `tail -n ${n} "${path}"`);
-      const text = result.code === 0 ? result.stdout : `Error: ${result.stderr}`;
-      return { content: [{ type: 'text', text: `[${node}] ${path} (last ${n} lines)\n${text}` }] };
+      if (result.code !== 0) return fail(result.stderr);
+      return ok(node, result.durationMs, result.stdout, `tail ${path}`);
     }
   );
 
@@ -314,8 +327,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         ? await manager.execOn(targetNodes, cmd)
         : await manager.execAll(cmd);
 
-      const text = results.map((r) => `[${r.nodeId}]\n${r.stdout}`).join('\n\n');
-      return { content: [{ type: 'text', text }] };
+      return multiResult(results);
     }
   );
 
@@ -330,8 +342,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         ? await manager.execOn(targetNodes, cmd)
         : await manager.execAll(cmd);
 
-      const text = results.map((r) => `[${r.nodeId}]\n${r.stdout}`).join('\n\n');
-      return { content: [{ type: 'text', text }] };
+      return multiResult(results);
     }
   );
 
@@ -353,10 +364,9 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         case 'pip': cmd = `pip install ${package_name}`; break;
       }
       const result = await manager.exec(node, cmd);
-      const text = result.code === 0
-        ? `Installed ${package_name} via ${pm} on ${node}`
-        : `Install failed: ${result.stderr}`;
-      return { content: [{ type: 'text', text }] };
+      return result.code === 0
+        ? okBrief(`${node} installed ${package_name} (${pm})`)
+        : fail(`${node} ${pm} install ${package_name}: ${result.stderr.split('\n').slice(-3).join('\n')}`);
     }
   );
 
@@ -371,8 +381,9 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     },
     async ({ service, action, node }) => {
       const result = await manager.exec(node, `systemctl ${action} ${service}`);
-      const text = result.code === 0 ? result.stdout || `${action} ${service}: OK` : `Error: ${result.stderr}`;
-      return { content: [{ type: 'text', text: `[${node}] ${text}` }] };
+      if (result.code !== 0) return fail(`${node} systemctl ${action} ${service}: ${result.stderr}`);
+      const body = result.stdout || 'ok';
+      return okBrief(`${node} ${action} ${service}: ${body.split('\n').slice(0, 5).join('\n')}`);
     }
   );
 
@@ -387,8 +398,8 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     async ({ command, node }) => {
       const nodeId = node ?? 'contabo';
       const result = await manager.exec(nodeId, `docker ${command}`);
-      const text = result.code === 0 ? result.stdout : `Error: ${result.stderr}`;
-      return { content: [{ type: 'text', text: `[${nodeId}] docker ${command}\n${text}` }] };
+      if (result.code !== 0) return fail(`${nodeId} docker ${command}: ${result.stderr}`);
+      return ok(nodeId, result.durationMs, result.stdout, `docker ${command.split(' ')[0]}`);
     }
   );
 
@@ -402,7 +413,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     },
     async ({ url, node }) => {
       const result = await openBrowser(manager, url, node);
-      return { content: [{ type: 'text', text: result }] };
+      return okBrief(result);
     }
   );
 
@@ -422,20 +433,18 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       const act = action ?? 'create';
       if (act === 'list') {
         const list = tunnels.list();
-        const text = list.length === 0
-          ? 'No active tunnels'
-          : list.map((t) => `${t.id}: localhost:${t.localPort} â ${t.nodeId}:${t.remotePort}`).join('\n');
-        return { content: [{ type: 'text', text }] };
+        if (list.length === 0) return okBrief('no active tunnels');
+        return okBrief(list.map((tn) => `${tn.id}  :${tn.localPort} -> ${tn.nodeId}:${tn.remotePort}`).join('\n'));
       }
       if (act === 'close' && tunnel_id) {
         tunnels.close(tunnel_id);
-        return { content: [{ type: 'text', text: `Closed tunnel ${tunnel_id}` }] };
+        return okBrief(`closed ${tunnel_id}`);
       }
       try {
         const info = await tunnels.create(node, local_port, remote_port, remote_host);
-        return { content: [{ type: 'text', text: `Tunnel ${info.id}: localhost:${info.localPort} â ${info.nodeId}:${info.remotePort}` }] };
+        return okBrief(`tunnel ${info.id}  :${info.localPort} -> ${info.nodeId}:${info.remotePort}`);
       } catch (e) {
-        return { content: [{ type: 'text', text: `Error: ${(e as Error).message}` }] };
+        return fail((e as Error).message);
       }
     }
   );
@@ -453,7 +462,6 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     async ({ src_node, src_path, dst_path, dst_nodes }) => {
       const targets = (dst_nodes ?? remoteNodes().map((n) => n.id)).filter((dst) => dst !== src_node);
 
-      // Parallel deployment to all targets
       const settled = await Promise.allSettled(
         targets.map(async (dst) => {
           const r = await transfer.transfer(src_node, src_path, dst, dst_path);
@@ -461,13 +469,13 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         })
       );
 
-      const results = settled.map((s, i) =>
+      const lines = settled.map((s, i) =>
         s.status === 'fulfilled'
-          ? `${s.value.dst}: OK (${s.value.speed.toFixed(1)} MB/s)`
-          : `${targets[i]}: FAILED â ${(s.reason as Error).message}`
+          ? `  ${s.value.dst}  ok  ${s.value.speed.toFixed(1)}MB/s`
+          : `  ${targets[i]}  FAIL  ${(s.reason as Error).message}`
       );
 
-      return { content: [{ type: 'text', text: `Deploy ${src_path} â ${dst_path}\n${results.join('\n')}` }] };
+      return okBrief(`deploy ${src_path} -> ${dst_path}\n${lines.join('\n')}`);
     }
   );
 
@@ -482,7 +490,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     },
     async ({ operation, args, node }) => {
       const output = await kernelExec(manager, node, operation, args ?? '');
-      return { content: [{ type: 'text', text: `[${node}] ${operation} ${args ?? ''}\n${output}` }] };
+      return ok(node, 0, output, `${operation} ${args ?? ''}`.trim());
     }
   );
 
@@ -509,7 +517,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         clearTimeout(timer);
       }
 
-      return { content: [{ type: 'text', text: `[${node}] stream: ${command}\n${output}` }] };
+      return ok(node, maxMs, output, `stream`);
     }
   );
 
@@ -543,7 +551,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
 
       await closePromise;
       shells.closeShell(session.id);
-      return { content: [{ type: 'text', text: `[${node}] persistent shell\n${output}` }] };
+      return ok(node, 0, output, `shell (${commands.length} cmds)`);
     }
   );
 
@@ -562,12 +570,11 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         case 'memory': cmd = "free -h"; break;
         case 'disk': cmd = "df -h / /home 2>/dev/null"; break;
         case 'network': cmd = "ss -s"; break;
-        case 'all': cmd = "echo '=== CPU ===' && top -bn1 | head -5 && echo '=== MEM ===' && free -h && echo '=== DISK ===' && df -h / 2>/dev/null"; break;
+        case 'all': cmd = "echo '=CPU=' && top -bn1 | head -5 && echo '=MEM=' && free -h && echo '=DISK=' && df -h / 2>/dev/null"; break;
       }
 
       const results = await manager.execAll(cmd);
-      const text = results.map((r) => `[${r.nodeId}]\n${r.stdout}`).join('\n\n');
-      return { content: [{ type: 'text', text }] };
+      return multiResult(results);
     }
   );
 
@@ -605,13 +612,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       ].join('\n');
 
       const result = await manager.exec(nodeId, wrappedCmd);
-      const displayLabel = label ? ` (${label})` : '';
-      const output = result.code === 0
-        ? result.stdout || '(no output)'
-        : result.code === 124
-          ? `Timeout after ${timeoutSec}s: ${result.stdout || '(no output)'}`
-          : `Error (exit ${result.code}): ${result.stderr}`;
-      return { content: [{ type: 'text', text: `[${nodeId}]${displayLabel} (${result.durationMs}ms)\n${output}` }] };
+      return ok(nodeId, result.durationMs, fmtExecOutput(result, timeoutSec), label ?? `${interp} script`);
     }
   );
 
@@ -633,11 +634,11 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       const execute = async (item: { node?: string; command: string; label?: string }) => {
         const nodeId = item.node ?? 'contabo';
         const result = await manager.exec(nodeId, item.command);
-        const lbl = item.label ? ` ${item.label}` : '';
-        const output = result.code === 0
-          ? result.stdout || '(no output)'
-          : `Error (exit ${result.code}): ${result.stderr}`;
-        return `[${nodeId}]${lbl} (${result.durationMs}ms)\n${output}`;
+        const lbl = item.label ?? item.command.slice(0, 40);
+        const body = result.code === 0
+          ? (result.stdout || '(empty)').split('\n').slice(0, 20).join('\n')
+          : `exit ${result.code}: ${result.stderr.split('\n').slice(0, 5).join('\n')}`;
+        return `-- ${nodeId} > ${lbl}  ${t(result.durationMs)}\n${body}`;
       };
 
       const results = runParallel
@@ -648,7 +649,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
             return [...prev, result];
           }, Promise.resolve([]));
 
-      return { content: [{ type: 'text', text: results.join('\n\n') }] };
+      return okBrief(trim(results.join('\n\n')));
     }
   );
 
@@ -665,14 +666,189 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
 
       if (check_only) {
         const check = await checkForUpdate();
-        const text = check.updateAvailable
-          ? `Update available: ${check.current} â ${check.latest}\nRun omniwire_update to install.\n\nSystem: ${info.platform}/${info.arch} node ${info.nodeVersion}`
-          : `Up to date (${check.current})\n\nSystem: ${info.platform}/${info.arch} node ${info.nodeVersion}`;
-        return { content: [{ type: 'text', text }] };
+        return check.updateAvailable
+          ? okBrief(`update available: ${check.current} -> ${check.latest}  (${info.platform}/${info.arch})`)
+          : okBrief(`up to date (${check.current})  ${info.platform}/${info.arch}`);
       }
 
       const result = await selfUpdate();
-      return { content: [{ type: 'text', text: `${result.message}\n\nSystem: ${info.platform}/${info.arch} node ${info.nodeVersion}` }] };
+      return okBrief(`${result.message}  ${info.platform}/${info.arch}`);
+    }
+  );
+
+  // --- Tool 27: omniwire_cron ---
+  server.tool(
+    'omniwire_cron',
+    'Manage cron jobs on a node. List, add, or remove scheduled tasks.',
+    {
+      action: z.enum(['list', 'add', 'remove']).describe('Action'),
+      node: z.string().describe('Target node'),
+      schedule: z.string().optional().describe('Cron schedule (e.g., "0 */6 * * *"). Required for add.'),
+      command: z.string().optional().describe('Command to schedule. Required for add.'),
+      pattern: z.string().optional().describe('Pattern to match for remove (removes matching lines from crontab)'),
+    },
+    async ({ action, node, schedule, command, pattern }) => {
+      if (action === 'list') {
+        const result = await manager.exec(node, 'crontab -l 2>/dev/null || echo "(no crontab)"');
+        return ok(node, result.durationMs, result.stdout, 'crontab');
+      }
+      if (action === 'add') {
+        if (!schedule || !command) return fail('schedule and command required for add');
+        const escaped = command.replace(/'/g, "'\\''");
+        const result = await manager.exec(node, `(crontab -l 2>/dev/null; echo '${schedule} ${escaped}') | sort -u | crontab -`);
+        return result.code === 0
+          ? okBrief(`${node} cron added: ${schedule} ${command.slice(0, 50)}`)
+          : fail(`${node} cron add: ${result.stderr}`);
+      }
+      if (action === 'remove' && pattern) {
+        const esc = pattern.replace(/'/g, "'\\''");
+        const result = await manager.exec(node, `crontab -l 2>/dev/null | grep -v '${esc}' | crontab -`);
+        return result.code === 0
+          ? okBrief(`${node} cron removed matching: ${pattern}`)
+          : fail(`${node} cron remove: ${result.stderr}`);
+      }
+      return fail('invalid action/params');
+    }
+  );
+
+  // --- Tool 28: omniwire_env ---
+  server.tool(
+    'omniwire_env',
+    'Get or set environment variables on a node (persistent via /etc/environment).',
+    {
+      action: z.enum(['get', 'set', 'list']).describe('Action'),
+      node: z.string().describe('Target node'),
+      key: z.string().optional().describe('Variable name'),
+      value: z.string().optional().describe('Variable value (for set)'),
+    },
+    async ({ action, node, key, value }) => {
+      if (action === 'list') {
+        const result = await manager.exec(node, 'cat /etc/environment 2>/dev/null; echo "---"; env | sort | head -40');
+        return ok(node, result.durationMs, result.stdout, 'env list');
+      }
+      if (action === 'get' && key) {
+        const result = await manager.exec(node, `bash -c 'source /etc/environment 2>/dev/null; echo "\${${key}}"'`);
+        const val = result.stdout.trim();
+        return okBrief(`${node} ${key}=${val || '(unset)'}`);
+      }
+      if (action === 'set' && key && value !== undefined) {
+        const esc = value.replace(/'/g, "'\\''");
+        const result = await manager.exec(node, `grep -q '^${key}=' /etc/environment 2>/dev/null && sed -i 's|^${key}=.*|${key}=${esc}|' /etc/environment || echo '${key}=${esc}' >> /etc/environment`);
+        return result.code === 0
+          ? okBrief(`${node} ${key}=${value.slice(0, 40)} (persisted)`)
+          : fail(`${node} env set: ${result.stderr}`);
+      }
+      return fail('invalid action/params');
+    }
+  );
+
+  // --- Tool 29: omniwire_network ---
+  server.tool(
+    'omniwire_network',
+    'Network diagnostics: ping, traceroute, dns lookup, open ports, bandwidth test.',
+    {
+      action: z.enum(['ping', 'traceroute', 'dns', 'ports', 'speed', 'connections']).describe('Diagnostic action'),
+      node: z.string().describe('Node to run from'),
+      target: z.string().optional().describe('Target host/IP (required for ping, traceroute, dns)'),
+    },
+    async ({ action, node, target }) => {
+      let cmd: string;
+      switch (action) {
+        case 'ping':
+          if (!target) return fail('target required');
+          cmd = `ping -c 4 -W 2 ${target} 2>&1 | tail -5`;
+          break;
+        case 'traceroute':
+          if (!target) return fail('target required');
+          cmd = `traceroute -m 15 -w 2 ${target} 2>&1 | head -20`;
+          break;
+        case 'dns':
+          if (!target) return fail('target required');
+          cmd = `dig +short ${target} 2>/dev/null || nslookup ${target} 2>&1 | tail -5`;
+          break;
+        case 'ports':
+          cmd = 'ss -tlnp | head -30';
+          break;
+        case 'speed':
+          cmd = "curl -s -o /dev/null -w 'download: %{speed_download} bytes/s\\ntime: %{time_total}s\\n' https://speed.cloudflare.com/__down?bytes=10000000 2>&1";
+          break;
+        case 'connections':
+          cmd = 'ss -s';
+          break;
+      }
+      const result = await manager.exec(node, cmd);
+      return ok(node, result.durationMs, result.code === 0 ? result.stdout : result.stderr, `net ${action}`);
+    }
+  );
+
+  // --- Tool 30: omniwire_clipboard ---
+  server.tool(
+    'omniwire_clipboard',
+    'Copy text between nodes via a shared clipboard buffer.',
+    {
+      action: z.enum(['copy', 'paste', 'clear']).describe('Action'),
+      content: z.string().optional().describe('Text to copy (for copy action)'),
+      node: z.string().optional().describe('Node for paste (default: all)'),
+    },
+    async ({ action, content, node }) => {
+      const clipPath = '/tmp/.omniwire-clipboard';
+      if (action === 'copy' && content) {
+        const results = await manager.execAll(`cat << 'OW_CLIP' > ${clipPath}\n${content}\nOW_CLIP`);
+        const ok_count = results.filter((r) => r.code === 0).length;
+        return okBrief(`clipboard set on ${ok_count} nodes (${content.length} chars)`);
+      }
+      if (action === 'paste') {
+        const nodeId = node ?? 'contabo';
+        const result = await manager.exec(nodeId, `cat ${clipPath} 2>/dev/null || echo '(empty)'`);
+        return ok(nodeId, result.durationMs, result.stdout, 'clipboard');
+      }
+      if (action === 'clear') {
+        await manager.execAll(`rm -f ${clipPath}`);
+        return okBrief('clipboard cleared');
+      }
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 31: omniwire_git ---
+  server.tool(
+    'omniwire_git',
+    'Run git commands on a repository on any node.',
+    {
+      command: z.string().describe('Git subcommand (status, log --oneline -5, pull, etc.)'),
+      path: z.string().describe('Repository path on the node'),
+      node: z.string().optional().describe('Node (default: contabo)'),
+    },
+    async ({ command, path, node }) => {
+      const nodeId = node ?? 'contabo';
+      const result = await manager.exec(nodeId, `cd "${path}" && git ${command}`);
+      const shortCmd = command.split(' ').slice(0, 2).join(' ');
+      if (result.code !== 0) return fail(`${nodeId} git ${shortCmd}: ${result.stderr}`);
+      return ok(nodeId, result.durationMs, result.stdout, `git ${shortCmd}`);
+    }
+  );
+
+  // --- Tool 32: omniwire_syslog ---
+  server.tool(
+    'omniwire_syslog',
+    'Query system logs via journalctl on a node.',
+    {
+      node: z.string().describe('Target node'),
+      unit: z.string().optional().describe('Systemd unit to filter (e.g., nginx, docker)'),
+      lines: z.number().optional().describe('Number of lines (default 30)'),
+      since: z.string().optional().describe('Time filter (e.g., "1 hour ago", "today")'),
+      priority: z.enum(['emerg', 'alert', 'crit', 'err', 'warning', 'notice', 'info', 'debug']).optional(),
+    },
+    async ({ node, unit, lines, since, priority }) => {
+      const parts = ['journalctl --no-pager'];
+      if (unit) parts.push(`-u ${unit}`);
+      if (lines) parts.push(`-n ${lines}`);
+      else parts.push('-n 30');
+      if (since) parts.push(`--since '${since}'`);
+      if (priority) parts.push(`-p ${priority}`);
+      const result = await manager.exec(node, parts.join(' '));
+      const label = unit ? `syslog ${unit}` : 'syslog';
+      return ok(node, result.durationMs, result.code === 0 ? result.stdout : result.stderr, label);
     }
   );
 
