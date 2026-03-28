@@ -9,3 +9,17 @@ cybersync.bat
 cybersync.vbs
 .mcp.json
 integrations/
+
+# Secrets & credentials - NEVER commit
+.env*
+.npmrc
+.pypirc
+*.key
+*.pem
+*.p12
+secrets.*
+credentials/
+cookies/
+*.secret
+*.db
+*.sqlite
