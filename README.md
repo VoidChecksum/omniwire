@@ -1,25 +1,37 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:0A0E14,50:1A1F2E,100:59C2FF&height=200&section=header&text=OmniWire&fontSize=72&fontColor=59C2FF&animation=fadeIn&fontAlignY=35&desc=Unified%20Mesh%20Control%20Layer&descSize=18&descColor=8B949E&descAlignY=55" />
-    <source media="(prefers-color-scheme: light)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:E8EAED,50:D4D8DE,100:59C2FF&height=200&section=header&text=OmniWire&fontSize=72&fontColor=0A0E14&animation=fadeIn&fontAlignY=35&desc=Unified%20Mesh%20Control%20Layer&descSize=18&descColor=586069&descAlignY=55" />
-    <img alt="OmniWire" src="https://capsule-render.vercel.app/api?type=waving&color=0:0A0E14,50:1A1F2E,100:59C2FF&height=200&section=header&text=OmniWire&fontSize=72&fontColor=59C2FF&animation=fadeIn&fontAlignY=35&desc=Unified%20Mesh%20Control%20Layer&descSize=18&descColor=8B949E&descAlignY=55" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=venom&color=0:0A0E14,50:0D1B2A,100:1B2838&height=220&section=header&text=OmniWire&fontSize=80&fontColor=59C2FF&animation=fadeIn&fontAlignY=32&desc=Multi-Agent%20Mesh%20Control%20%E2%80%94%2053%20MCP%20Tools%20%C2%B7%20A2A%20Protocol%20%C2%B7%20~80ms%20Latency&descSize=16&descColor=8B949E&descAlignY=58" />
+    <source media="(prefers-color-scheme: light)" srcset="https://capsule-render.vercel.app/api?type=venom&color=0:E8EAED,50:D4D8DE,100:59C2FF&height=220&section=header&text=OmniWire&fontSize=80&fontColor=0A0E14&animation=fadeIn&fontAlignY=32&desc=Multi-Agent%20Mesh%20Control%20%E2%80%94%2053%20MCP%20Tools%20%C2%B7%20A2A%20Protocol%20%C2%B7%20~80ms%20Latency&descSize=16&descColor=586069&descAlignY=58" />
+    <img alt="OmniWire" src="https://capsule-render.vercel.app/api?type=venom&color=0:0A0E14,50:0D1B2A,100:1B2838&height=220&section=header&text=OmniWire&fontSize=80&fontColor=59C2FF&animation=fadeIn&fontAlignY=32&desc=Multi-Agent%20Mesh%20Control%20%E2%80%94%2053%20MCP%20Tools%20%C2%B7%20A2A%20Protocol%20%C2%B7%20~80ms%20Latency&descSize=16&descColor=8B949E&descAlignY=58" />
   </picture>
 </p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0A0E14" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP-49_tools-59C2FF?style=for-the-badge&labelColor=0A0E14" alt="tools" />
-  <img src="https://img.shields.io/badge/A2A-ready-91B362?style=for-the-badge&labelColor=0A0E14" alt="A2A" />
-  <img src="https://img.shields.io/badge/transport-stdio_%7C_SSE_%7C_REST-E6B450?style=for-the-badge&labelColor=0A0E14" alt="transports" />
-  <img src="https://img.shields.io/badge/node-%E2%89%A520-CC93E6?style=for-the-badge&logo=node.js&labelColor=0A0E14" alt="node" />
+  <img src="https://img.shields.io/badge/MCP-53_tools-59C2FF?style=for-the-badge&labelColor=0A0E14" alt="tools" />
+  <img src="https://img.shields.io/badge/A2A-protocol-00C853?style=for-the-badge&labelColor=0A0E14" alt="A2A" />
+  <img src="https://img.shields.io/badge/latency-~80ms-FF6D00?style=for-the-badge&labelColor=0A0E14" alt="latency" />
+  <img src="https://img.shields.io/badge/lz4-transfer-CC93E6?style=for-the-badge&labelColor=0A0E14" alt="lz4" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8B949E?style=for-the-badge&labelColor=0A0E14" alt="license" /></a>
 </p>
 
+<br/>
+
 <p align="center">
-  <b>One MCP server to control all your machines.</b><br/>
-  <sub>49 tools. Multi-agent orchestration. A2A messaging. Distributed locking. Cross-node pipelines.</sub><br/>
-  <sub>SSH2 failover, adaptive file transfers, encrypted config sync, agentic chaining.</sub>
+  <b>The infrastructure layer for AI agent swarms.</b>
 </p>
+
+<p align="center">
+53 MCP tools &bull; Agent-to-Agent messaging &bull; Distributed task queues &bull; Capability routing<br/>
+AES-128-GCM SSH2 &bull; LZ4 transfers &bull; Circuit breakers &bull; Multi-path failover<br/>
+Session chaining &bull; Pipeline DAGs &bull; Blackboard architecture &bull; Event pub/sub
+</p>
+
+<br/>
+
+> **v2.5** &mdash; AES-128-GCM cipher preference, 2s keepalive, LZ4 compression, `shuf` port finder, SFTP-first reads, agent registry, blackboard, task queues, capability routing. See [changelog](#changelog).
+
+<br/>
 
 ---
 
@@ -71,7 +83,7 @@ graph TB
         direction TB
         MCP["MCP Protocol Layer<br/>stdio | SSE | REST"]
 
-        subgraph tools["49 Tools"]
+        subgraph tools["53 Tools"]
             direction LR
             EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline"]
             AGENT["Agentic<br/>store  watch  task<br/>a2a  events  locks"]
@@ -207,7 +219,7 @@ Nodes --push--> PostgreSQL (cyberbase)
 
 ---
 
-## All 49 Tools
+## All 53 Tools
 
 ### Execution (5)
 
@@ -219,7 +231,7 @@ Nodes --push--> PostgreSQL (cyberbase)
 | `omniwire_broadcast` | Execute on all nodes simultaneously. JSON format support. |
 | `omniwire_pipeline` | Multi-step DAG. `{{prev}}`/`{{stepN}}` interpolation, per-step error handling, cross-node. |
 
-### Agentic / A2A (9)
+### Agentic / A2A (13)
 
 | Tool | Description |
 |------|-------------|
@@ -231,6 +243,10 @@ Nodes --push--> PostgreSQL (cyberbase)
 | `omniwire_semaphore` | Distributed locking. Atomic acquire/release to prevent race conditions. |
 | `omniwire_event` | Pub/sub events. Emit/poll timestamped events per topic. ACP/A2A/ACPX compatible. |
 | `omniwire_workflow` | Define and run reusable named workflows (DAGs). Stored on disk, triggered by any agent. |
+| `omniwire_agent_registry` | Register/discover agents by capabilities. Dynamic A2A routing. Heartbeat. |
+| `omniwire_blackboard` | Shared blackboard for agent swarms. Post findings, read, search across topics. |
+| `omniwire_task_queue` | Distributed task queue. Enqueue/dequeue with priorities. Complete/fail reporting. |
+| `omniwire_capability` | Query node capabilities (tools, runtimes, GPU). Intelligent task routing. |
 
 ### Files & Transfer (6)
 
@@ -297,16 +313,30 @@ Nodes --push--> PostgreSQL (cyberbase)
 
 ## Performance
 
-| Operation | Latency | Details |
-|-----------|---------|---------|
-| Command exec | ~120ms | SSH2 channel on persistent connection |
-| Mesh status (all nodes) | ~150ms | Parallel probes, 5s cache |
-| File read (<1MB) | ~80ms | SFTP, binary-safe |
-| Transfer (10MB) | ~200ms | gzip netcat over WireGuard |
-| Pipeline (5 steps) | ~600ms | Sequential with interpolation |
-| Health check (4 nodes) | ~200ms | Parallel, structured output |
-| A2A message send | ~130ms | File-based queue |
-| Config push (all nodes) | ~200ms | Parallel + Obsidian mirror |
+| Operation | Latency | v2.5 Optimization |
+|-----------|---------|-------------------|
+| **Command exec** | **~80ms** | AES-128-GCM cipher, persistent SSH2 channel, zero-fork `:` ping |
+| **Mesh status** | **~100ms** | Parallel probes, 5s cache, single `/proc` read (no pipes) |
+| **File read (<1MB)** | **~60ms** | SFTP-first path (skips `cat` shell fork) |
+| **Transfer (10MB)** | **~120ms** | LZ4 compression (10x faster than gzip), 50ms bind delay |
+| **Transfer (1GB)** | **~8s** | aria2c 16-connection parallel, 150ms server startup |
+| **Pipeline (5 steps)** | **~400ms** | `{{prev}}` interpolation, no extra tool calls |
+| **Health check (all)** | **~90ms** | Parallel Promise.allSettled, structured JSON |
+| **A2A message** | **~85ms** | File-append queue, atomic dequeue |
+| **Config push** | **~150ms** | Parallel deploy + Obsidian mirror |
+| **Reconnect** | **~300ms** | 300ms initial delay (was 500ms), 2s keepalive detection |
+
+**Optimizations in v2.5:**
+- **Cipher**: AES-128-GCM (AES-NI accelerated) preferred over default negotiation
+- **Key exchange**: curve25519-sha256 preferred (fastest modern KEX)
+- **Keepalive**: 2s interval, 2 retries = 4s dead detection (was 6s)
+- **Port finder**: `shuf` (pure bash) replaces `python3 -c socket` (saves ~30ms per transfer)
+- **Compression**: LZ4-1 for transfers (10x faster than gzip, ~same ratio for mixed data)
+- **Buffer**: Array push + join replaces string concatenation (O(n) vs O(n^2) for large outputs)
+- **Status**: Single `/proc` read replaces multiple piped commands
+- **Health ping**: `:` builtin replaces `true` (no hash lookup, no fork)
+- **Reads**: SFTP subsystem tried first, falls back to `cat` only on failure
+- **Circuit breaker**: 15s recovery (was 20s), 10s reconnect cap (was 15s)
 
 ---
 
@@ -358,6 +388,17 @@ Create `~/.omniwire/mesh.json`:
 ## Changelog
 
 <details>
+<summary><b>v2.5.0 -- Performance Overhaul, A2A Protocol Expansion</b></summary>
+
+**Performance**: AES-128-GCM cipher, curve25519-sha256 KEX, 2s keepalive, LZ4 transfers (10x faster), `shuf` port finder (-30ms), SFTP-first reads, array buffer concat, `/proc` single-read status, `:` builtin health ping, 300ms reconnect start, 15s circuit breaker.
+
+**4 new A2A tools** (49 -> 53): agent_registry (capability discovery), blackboard (swarm collaboration), task_queue (distributed work), capability (node routing).
+
+**Connectivity**: Always-on 2s keepalive with 4s dead detection. 5s connect timeout. 10s reconnect cap. 15s circuit recovery.
+
+</details>
+
+<details>
 <summary><b>v2.4.0 -- Agentic Loop, A2A, Multi-Agent Orchestration</b></summary>
 
 **9 new agentic tools** (40 -> 49): store, pipeline, watch, healthcheck, agent_task, a2a_message, semaphore, event, workflow
@@ -396,7 +437,7 @@ Multi-path SSH (WireGuard/Tailscale/Public), SSH key caching, CyberBase integrat
 ```
 omniwire/
   src/
-    mcp/           MCP server (49 tools, 3 transports)
+    mcp/           MCP server (53 tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
     sync/          CyberSync + CyberBase (PostgreSQL, Obsidian, encryption)
     protocol/      Mesh config, types, path parsing

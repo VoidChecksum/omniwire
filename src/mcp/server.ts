@@ -85,7 +85,7 @@ const resultStore = new Map<string, string>();  // key -> value store for chaini
 export function createOmniWireServer(manager: NodeManager, transfer: TransferEngine): McpServer {
   const server = new McpServer({
     name: 'omniwire',
-    version: '2.4.0',
+    version: '2.5.0',
   });
 
   const shells = new ShellManager(manager);
@@ -1409,6 +1409,195 @@ tags: ${meshNode.tags.join(', ')}`;
       }
 
       return fail('invalid action');
+    }
+  );
+
+  // --- Tool 42: omniwire_agent_registry ---
+  server.tool(
+    'omniwire_agent_registry',
+    'Register/discover agents on the mesh. Agents announce their capabilities and other agents can discover them. Enables dynamic A2A routing and capability-based task delegation.',
+    {
+      action: z.enum(['register', 'deregister', 'discover', 'list', 'heartbeat']).describe('Action'),
+      node: z.string().optional().describe('Node hosting registry (default: contabo)'),
+      agent_id: z.string().optional().describe('Unique agent ID'),
+      capabilities: z.array(z.string()).optional().describe('Agent capabilities (e.g., ["scan", "exploit", "report"])'),
+      metadata: z.string().optional().describe('JSON metadata about the agent'),
+      capability: z.string().optional().describe('Capability to search for (discover action)'),
+    },
+    async ({ action, node, agent_id, capabilities, metadata, capability }) => {
+      const nodeId = node ?? 'contabo';
+      const regDir = '/tmp/.omniwire-agents';
+
+      if (action === 'register') {
+        if (!agent_id) return fail('agent_id required');
+        const entry = JSON.stringify({ id: agent_id, capabilities: capabilities ?? [], metadata: metadata ?? '{}', ts: Date.now(), node: nodeId });
+        const escaped = entry.replace(/'/g, "'\\''");
+        await manager.exec(nodeId, `mkdir -p ${regDir} && echo '${escaped}' > ${regDir}/${agent_id}.json`);
+        return okBrief(`agent ${agent_id} registered (${(capabilities ?? []).join(', ')})`);
+      }
+
+      if (action === 'deregister') {
+        if (!agent_id) return fail('agent_id required');
+        await manager.exec(nodeId, `rm -f ${regDir}/${agent_id}.json`);
+        return okBrief(`agent ${agent_id} deregistered`);
+      }
+
+      if (action === 'heartbeat') {
+        if (!agent_id) return fail('agent_id required');
+        await manager.exec(nodeId, `[ -f ${regDir}/${agent_id}.json ] && tmp=$(cat ${regDir}/${agent_id}.json) && echo "$tmp" | sed 's/"ts":[0-9]*/"ts":${Date.now()}/' > ${regDir}/${agent_id}.json`);
+        return okBrief(`agent ${agent_id} heartbeat`);
+      }
+
+      if (action === 'discover' && capability) {
+        const result = await manager.exec(nodeId, `grep -l '"${capability}"' ${regDir}/*.json 2>/dev/null | xargs -I{} cat {} 2>/dev/null`);
+        return ok(nodeId, result.durationMs, result.stdout || '(no agents with that capability)', `discover ${capability}`);
+      }
+
+      if (action === 'list') {
+        const result = await manager.exec(nodeId, `cat ${regDir}/*.json 2>/dev/null || echo '(no agents)'`);
+        return ok(nodeId, result.durationMs, result.stdout, 'agent registry');
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 43: omniwire_blackboard ---
+  server.tool(
+    'omniwire_blackboard',
+    'Shared blackboard for multi-agent collaboration. Agents post findings, hypotheses, and decisions to topic-scoped boards. Other agents read and build on them. Classic AI blackboard architecture for agent swarms.',
+    {
+      action: z.enum(['post', 'read', 'topics', 'clear', 'search']).describe('Action'),
+      node: z.string().optional(),
+      topic: z.string().optional().describe('Board topic (e.g., "recon-findings", "vuln-analysis")'),
+      content: z.string().optional().describe('Content to post'),
+      author: z.string().optional().describe('Author agent ID'),
+      query: z.string().optional().describe('Search query (grep pattern) for search action'),
+      limit: z.number().optional().describe('Max entries (default: 20)'),
+    },
+    async ({ action, node, topic, content, author, query, limit }) => {
+      const nodeId = node ?? 'contabo';
+      const bbDir = '/tmp/.omniwire-blackboard';
+      const n = limit ?? 20;
+
+      if (action === 'post') {
+        if (!topic || !content) return fail('topic and content required');
+        const entry = JSON.stringify({ ts: Date.now(), author: author ?? 'agent', content });
+        const escaped = entry.replace(/'/g, "'\\''");
+        await manager.exec(nodeId, `mkdir -p ${bbDir} && echo '${escaped}' >> ${bbDir}/${topic}.log`);
+        return okBrief(`posted to ${topic} (${content.length} chars)`);
+      }
+
+      if (action === 'read') {
+        if (!topic) return fail('topic required');
+        const result = await manager.exec(nodeId, `tail -${n} ${bbDir}/${topic}.log 2>/dev/null || echo '(empty board)'`);
+        return ok(nodeId, result.durationMs, result.stdout, `board:${topic}`);
+      }
+
+      if (action === 'topics') {
+        const result = await manager.exec(nodeId, `ls -1 ${bbDir}/*.log 2>/dev/null | xargs -I{} sh -c 'echo "$(basename {} .log) $(wc -l < {})"' 2>/dev/null || echo '(no topics)'`);
+        return ok(nodeId, result.durationMs, result.stdout, 'blackboard topics');
+      }
+
+      if (action === 'search' && query) {
+        const escaped = query.replace(/'/g, "'\\''");
+        const topicFilter = topic ? `${bbDir}/${topic}.log` : `${bbDir}/*.log`;
+        const result = await manager.exec(nodeId, `grep -h '${escaped}' ${topicFilter} 2>/dev/null | tail -${n}`);
+        return ok(nodeId, result.durationMs, result.stdout || '(no matches)', `search:${query}`);
+      }
+
+      if (action === 'clear') {
+        if (!topic) return fail('topic required');
+        await manager.exec(nodeId, `rm -f ${bbDir}/${topic}.log`);
+        return okBrief(`board ${topic} cleared`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 44: omniwire_task_queue ---
+  server.tool(
+    'omniwire_task_queue',
+    'Distributed task queue for agent swarms. Producers enqueue tasks, consumer agents dequeue and process them. Supports priorities, deadlines, and result reporting. Core A2A work distribution primitive.',
+    {
+      action: z.enum(['enqueue', 'dequeue', 'complete', 'fail', 'status', 'pending']).describe('Action'),
+      node: z.string().optional(),
+      queue: z.string().optional().describe('Queue name (default: "default")'),
+      task: z.string().optional().describe('Task payload (JSON) for enqueue'),
+      priority: z.number().optional().describe('Priority 0-9, higher = more urgent (default: 5)'),
+      task_id: z.string().optional().describe('Task ID for complete/fail'),
+      result: z.string().optional().describe('Result data for complete'),
+      error: z.string().optional().describe('Error message for fail'),
+    },
+    async ({ action, node, queue, task, priority, task_id, result: taskResult, error: taskError }) => {
+      const nodeId = node ?? 'contabo';
+      const qName = queue ?? 'default';
+      const qDir = `/tmp/.omniwire-taskq/${qName}`;
+
+      if (action === 'enqueue') {
+        if (!task) return fail('task required');
+        const id = `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const pri = priority ?? 5;
+        const entry = JSON.stringify({ id, priority: pri, ts: Date.now(), status: 'pending', task: JSON.parse(task) });
+        const escaped = entry.replace(/'/g, "'\\''");
+        await manager.exec(nodeId, `mkdir -p ${qDir} && echo '${escaped}' > ${qDir}/${pri}_${id}.task`);
+        return okBrief(`enqueued ${id} (priority ${pri})`);
+      }
+
+      if (action === 'dequeue') {
+        // Take highest priority task (9 first, then 8, ...)
+        const result = await manager.exec(nodeId, `f=$(ls -r ${qDir}/*.task 2>/dev/null | head -1); [ -n "$f" ] && cat "$f" && rm -f "$f" || echo '(empty queue)'`);
+        return ok(nodeId, result.durationMs, result.stdout, `dequeue:${qName}`);
+      }
+
+      if (action === 'complete' && task_id) {
+        const entry = JSON.stringify({ id: task_id, status: 'complete', ts: Date.now(), result: taskResult ?? '' });
+        const escaped = entry.replace(/'/g, "'\\''");
+        await manager.exec(nodeId, `mkdir -p ${qDir}/done && echo '${escaped}' > ${qDir}/done/${task_id}.result`);
+        return okBrief(`task ${task_id} completed`);
+      }
+
+      if (action === 'fail' && task_id) {
+        const entry = JSON.stringify({ id: task_id, status: 'failed', ts: Date.now(), error: taskError ?? 'unknown' });
+        const escaped = entry.replace(/'/g, "'\\''");
+        await manager.exec(nodeId, `mkdir -p ${qDir}/failed && echo '${escaped}' > ${qDir}/failed/${task_id}.result`);
+        return okBrief(`task ${task_id} failed`);
+      }
+
+      if (action === 'status') {
+        const result = await manager.exec(nodeId, `echo "pending: $(ls ${qDir}/*.task 2>/dev/null | wc -l)"; echo "done: $(ls ${qDir}/done/*.result 2>/dev/null | wc -l)"; echo "failed: $(ls ${qDir}/failed/*.result 2>/dev/null | wc -l)"`);
+        return ok(nodeId, result.durationMs, result.stdout, `queue:${qName}`);
+      }
+
+      if (action === 'pending') {
+        const result = await manager.exec(nodeId, `cat ${qDir}/*.task 2>/dev/null | head -20 || echo '(empty)'`);
+        return ok(nodeId, result.durationMs, result.stdout, `pending:${qName}`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 45: omniwire_capability ---
+  server.tool(
+    'omniwire_capability',
+    'Query node capabilities for intelligent task routing. Returns what tools, runtimes, and resources each node has. Agents use this to decide WHERE to dispatch tasks.',
+    {
+      node: z.string().optional().describe('Specific node (default: all online)'),
+      check: z.array(z.string()).optional().describe('Specific capabilities to check (e.g., ["docker", "python3", "gpu", "nmap"])'),
+    },
+    async ({ node, check }) => {
+      const checks = check ?? ['docker', 'python3', 'node', 'go', 'nmap', 'ffuf', 'git', 'psql', 'lz4', 'aria2c', 'gcc'];
+      const cmd = checks.map((c) => `command -v ${c} >/dev/null 2>&1 && echo "${c}:yes" || echo "${c}:no"`).join('; ');
+
+      if (node) {
+        const result = await manager.exec(node, cmd);
+        return ok(node, result.durationMs, result.stdout, 'capabilities');
+      }
+
+      const results = await manager.execAll(cmd);
+      return multiResult(results);
     }
   );
 

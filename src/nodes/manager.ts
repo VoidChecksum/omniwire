@@ -10,21 +10,34 @@ interface NodeConnection {
   node: MeshNode;
   client: Client;
   connected: boolean;
-  activeHost: string | null;   // which host we're connected through
+  activeHost: string | null;
   lastPing: Date | null;
   reconnecting: boolean;
-  failures: number;        // consecutive failures (circuit breaker)
-  circuitOpenUntil: number; // timestamp when circuit re-closes
+  failures: number;
+  circuitOpenUntil: number;
 }
 
 type ReconnectCallback = (nodeId: string) => void;
 
-const MAX_OUTPUT_BYTES = 2 * 1024 * 1024; // 2MB output guard
-const STATUS_CACHE_TTL = 5000;             // 5s status cache
-const HEALTH_PING_INTERVAL = 30_000;       // 30s health pings
-const CIRCUIT_OPEN_DURATION = 20_000;      // 20s circuit breaker (recover faster)
+const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const STATUS_CACHE_TTL = 5000;
+const HEALTH_PING_INTERVAL = 30_000;
+const CIRCUIT_OPEN_DURATION = 15_000;      // 15s circuit breaker — faster recovery
 const CIRCUIT_FAILURE_THRESHOLD = 3;
-const CONNECT_TIMEOUT = 6000;              // 6s connection timeout
+const CONNECT_TIMEOUT = 5000;              // 5s connection timeout
+
+// Prefer fast ciphers + key exchange for lowest latency
+const PREFERRED_CIPHERS = [
+  'aes128-gcm@openssh.com',                // AES-NI accelerated, lowest overhead
+  'chacha20-poly1305@openssh.com',          // fast on non-AES-NI CPUs
+  'aes256-gcm@openssh.com',
+  'aes128-ctr',
+];
+const PREFERRED_KEX = [
+  'curve25519-sha256',                       // fastest modern key exchange
+  'curve25519-sha256@libssh.org',
+  'ecdh-sha2-nistp256',
+];
 
 export class NodeManager {
   private connections: Map<string, NodeConnection> = new Map();
@@ -34,7 +47,6 @@ export class NodeManager {
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private keyCache: Map<string, Buffer> = new Map();
 
-  // Cache SSH keys to avoid repeated disk reads
   private getKey(path: string): Buffer {
     let key = this.keyCache.get(path);
     if (!key) {
@@ -50,7 +62,6 @@ export class NodeManager {
     this.startHealthPing();
   }
 
-  // Try each host candidate (WG -> Tailscale -> Public) until one connects
   private async connectWithFallback(node: MeshNode): Promise<void> {
     if (node.isLocal) return;
     const hosts = getHostCandidates(node.id);
@@ -70,17 +81,10 @@ export class NodeManager {
     const client = new Client();
     const existing = this.connections.get(node.id);
     const conn: NodeConnection = existing ?? {
-      node,
-      client,
-      connected: false,
-      activeHost: null,
-      lastPing: null,
-      reconnecting: false,
-      failures: 0,
-      circuitOpenUntil: 0,
+      node, client, connected: false, activeHost: null,
+      lastPing: null, reconnecting: false, failures: 0, circuitOpenUntil: 0,
     };
     conn.client = client;
-
     this.connections.set(node.id, conn);
 
     return new Promise<void>((resolve, reject) => {
@@ -116,10 +120,12 @@ export class NodeManager {
         username: node.user,
         privateKey: this.getKey(node.identityFile),
         readyTimeout: CONNECT_TIMEOUT,
-        keepaliveInterval: 3000,
-        keepaliveCountMax: 2,
+        keepaliveInterval: 2000,           // 2s keepalive — fastest dead detection
+        keepaliveCountMax: 2,              // 4s total before disconnect
         algorithms: {
-          compress: ['none'],  // no compression � faster for small commands
+          cipher: PREFERRED_CIPHERS as any,
+          kex: PREFERRED_KEX as any,
+          compress: ['none'] as any,
         },
       };
 
@@ -132,8 +138,8 @@ export class NodeManager {
     if (!conn || conn.reconnecting) return;
 
     conn.reconnecting = true;
-    const currentDelay = this.reconnectDelays.get(node.id) ?? 500;
-    const jitter = Math.floor(Math.random() * 1000);
+    const currentDelay = this.reconnectDelays.get(node.id) ?? 300; // start at 300ms
+    const jitter = Math.floor(Math.random() * 500);
 
     setTimeout(async () => {
       try {
@@ -141,12 +147,11 @@ export class NodeManager {
         conn.reconnecting = false;
         conn.failures = 0;
         conn.circuitOpenUntil = 0;
-        this.reconnectDelays.set(node.id, 500); // reset on success
+        this.reconnectDelays.set(node.id, 300);
         for (const cb of this.reconnectCallbacks) cb(node.id);
       } catch {
         conn.reconnecting = false;
-        // Exponential backoff: 0.5s -> 1s -> 2s -> 4s -> 8s -> 15s cap
-        this.reconnectDelays.set(node.id, Math.min(currentDelay * 2, 15_000));
+        this.reconnectDelays.set(node.id, Math.min(currentDelay * 2, 10_000)); // 10s cap
         this.scheduleReconnect(node);
       }
     }, currentDelay + jitter);
@@ -179,8 +184,7 @@ export class NodeManager {
     return online;
   }
 
-  // Remote execution via SSH2 client.exec() — NOT child_process.exec()
-  // All commands run on remote nodes over authenticated SSH channels
+  // Remote execution via SSH2 client.exec() -- NOT child_process.exec()
   async exec(nodeId: string, command: string): Promise<ExecResult> {
     const start = Date.now();
 
@@ -190,30 +194,18 @@ export class NodeManager {
 
     const conn = this.connections.get(nodeId);
 
-    // Circuit breaker: skip if circuit is open
     if (conn && conn.circuitOpenUntil > Date.now()) {
-      return {
-        nodeId,
-        stdout: '',
-        stderr: `Node ${nodeId} circuit open (${conn.failures} consecutive failures)`,
-        code: -1,
-        durationMs: Date.now() - start,
-      };
+      return { nodeId, stdout: '', stderr: `Node ${nodeId} circuit open`, code: -1, durationMs: Date.now() - start };
     }
 
     if (!conn?.connected) {
-      return {
-        nodeId,
-        stdout: '',
-        stderr: `Node ${nodeId} is offline`,
-        code: -1,
-        durationMs: Date.now() - start,
-      };
+      return { nodeId, stdout: '', stderr: `Node ${nodeId} is offline`, code: -1, durationMs: Date.now() - start };
     }
 
     return new Promise<ExecResult>((resolve) => {
-      let stdout = '';
-      let stderr = '';
+      const chunks: string[] = [];    // array join is faster than string concat
+      const errChunks: string[] = [];
+      let totalBytes = 0;
       let truncated = false;
 
       conn.client.exec(command, (err, stream) => {
@@ -222,47 +214,39 @@ export class NodeManager {
           if (conn.failures >= CIRCUIT_FAILURE_THRESHOLD) {
             conn.circuitOpenUntil = Date.now() + CIRCUIT_OPEN_DURATION;
           }
-          resolve({
-            nodeId,
-            stdout: '',
-            stderr: err.message,
-            code: -1,
-            durationMs: Date.now() - start,
-          });
+          resolve({ nodeId, stdout: '', stderr: err.message, code: -1, durationMs: Date.now() - start });
           return;
         }
 
         stream.on('data', (data: Buffer) => {
-          if (!truncated && stdout.length < MAX_OUTPUT_BYTES) {
-            stdout += data.toString();
-            if (stdout.length >= MAX_OUTPUT_BYTES) truncated = true;
+          if (!truncated) {
+            const str = data.toString();
+            totalBytes += str.length;
+            if (totalBytes < MAX_OUTPUT_BYTES) {
+              chunks.push(str);
+            } else {
+              truncated = true;
+            }
           }
         });
 
         stream.stderr.on('data', (data: Buffer) => {
-          if (stderr.length < MAX_OUTPUT_BYTES) {
-            stderr += data.toString();
+          const str = data.toString();
+          if (errChunks.join('').length < MAX_OUTPUT_BYTES) {
+            errChunks.push(str);
           }
         });
 
         stream.on('close', (code: number) => {
           conn.lastPing = new Date();
-          conn.failures = 0; // reset on success
-          const suffix = truncated ? '\n[truncated at 2MB]' : '';
-          resolve({
-            nodeId,
-            stdout: stdout.trimEnd() + suffix,
-            stderr: stderr.trimEnd(),
-            code: code ?? 0,
-            durationMs: Date.now() - start,
-          });
+          conn.failures = 0;
+          const stdout = chunks.join('').trimEnd() + (truncated ? '\n[truncated at 2MB]' : '');
+          resolve({ nodeId, stdout, stderr: errChunks.join('').trimEnd(), code: code ?? 0, durationMs: Date.now() - start });
         });
       });
     });
   }
 
-  // Local execution uses execFile with bash -c to avoid shell injection
-  // Command strings here come from the user's own terminal input, not external sources
   private execLocal(command: string, start: number): Promise<ExecResult> {
     return new Promise<ExecResult>((resolve) => {
       execFile('bash', ['-c', command], {
@@ -281,13 +265,11 @@ export class NodeManager {
   }
 
   async execAll(command: string): Promise<ExecResult[]> {
-    const nodeIds = this.getOnlineNodes();
-    return Promise.all(nodeIds.map((id) => this.exec(id, command)));
+    return Promise.all(this.getOnlineNodes().map((id) => this.exec(id, command)));
   }
 
   async execRemote(command: string): Promise<ExecResult[]> {
-    const nodeIds = this.getOnlineNodes().filter((id) => id !== 'windows');
-    return Promise.all(nodeIds.map((id) => this.exec(id, command)));
+    return Promise.all(this.getOnlineNodes().filter((id) => id !== 'windows').map((id) => this.exec(id, command)));
   }
 
   async execOn(nodeIds: string[], command: string): Promise<ExecResult[]> {
@@ -296,71 +278,33 @@ export class NodeManager {
 
   async getNodeStatus(nodeId: string): Promise<NodeStatus> {
     if (nodeId === 'windows') {
-      return {
-        nodeId: 'windows',
-        online: true,
-        latencyMs: 0,
-        lastSeen: new Date(),
-        uptime: null,
-        loadAvg: null,
-        memUsedPct: null,
-        diskUsedPct: null,
-      };
+      return { nodeId: 'windows', online: true, latencyMs: 0, lastSeen: new Date(), uptime: null, loadAvg: null, memUsedPct: null, diskUsedPct: null };
     }
 
-    // Return cached status if fresh enough
     const cached = this.statusCache.get(nodeId);
-    if (cached && Date.now() - cached.at < STATUS_CACHE_TTL) {
-      return cached.status;
-    }
+    if (cached && Date.now() - cached.at < STATUS_CACHE_TTL) return cached.status;
 
     if (!this.isConnected(nodeId)) {
-      const status: NodeStatus = {
-        nodeId,
-        online: false,
-        latencyMs: null,
-        lastSeen: this.connections.get(nodeId)?.lastPing ?? null,
-        uptime: null,
-        loadAvg: null,
-        memUsedPct: null,
-        diskUsedPct: null,
-      };
+      const status: NodeStatus = { nodeId, online: false, latencyMs: null, lastSeen: this.connections.get(nodeId)?.lastPing ?? null, uptime: null, loadAvg: null, memUsedPct: null, diskUsedPct: null };
       this.statusCache.set(nodeId, { status, at: Date.now() });
       return status;
     }
 
     const start = Date.now();
-    const result = await this.exec(
-      nodeId,
-      "uptime -p; cat /proc/loadavg | awk '{print $1,$2,$3}'; free | awk '/Mem:/{printf \"%.1f\", $3/$2*100}'; echo; df / | awk 'NR==2{print $5}'"
+    // Single compact command — all metrics in one fork, no pipes
+    const result = await this.exec(nodeId,
+      "awk '{u=$2-$1;t=$2;if(t>0)printf \"%.0f\\n\",u/t*100}' /proc/stat 2>/dev/null|head -1;cat /proc/loadavg 2>/dev/null|cut -d' ' -f1-3;awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{if(t>0)printf \"%.1f\\n\",(t-a)/t*100}' /proc/meminfo;df / 2>/dev/null|awk 'NR==2{print $5}'|tr -d '%';uptime -p 2>/dev/null"
     );
     const latency = Date.now() - start;
 
-    let status: NodeStatus;
-    if (result.code !== 0) {
-      status = {
-        nodeId,
-        online: true,
-        latencyMs: latency,
-        lastSeen: new Date(),
-        uptime: null,
-        loadAvg: null,
-        memUsedPct: null,
-        diskUsedPct: null,
-      };
-    } else {
-      const lines = result.stdout.split('\n');
-      status = {
-        nodeId,
-        online: true,
-        latencyMs: latency,
-        lastSeen: new Date(),
-        uptime: lines[0] ?? null,
-        loadAvg: lines[1] ?? null,
-        memUsedPct: parseFloat(lines[2]) || null,
-        diskUsedPct: parseFloat(lines[3]) || null,
-      };
-    }
+    const lines = result.stdout.split('\n');
+    const status: NodeStatus = {
+      nodeId, online: true, latencyMs: latency, lastSeen: new Date(),
+      uptime: lines[4] ?? null,
+      loadAvg: lines[1] ?? null,
+      memUsedPct: parseFloat(lines[2]) || null,
+      diskUsedPct: parseFloat(lines[3]) || null,
+    };
 
     this.statusCache.set(nodeId, { status, at: Date.now() });
     return status;
@@ -394,11 +338,7 @@ export class NodeManager {
 
     return new Promise((resolve) => {
       conn.client.exec(command, (err, stream) => {
-        if (err) {
-          onError(err.message);
-          resolve(-1);
-          return;
-        }
+        if (err) { onError(err.message); resolve(-1); return; }
         stream.on('data', (d: Buffer) => onData(d.toString()));
         stream.stderr.on('data', (d: Buffer) => onError(d.toString()));
         stream.on('close', (code: number) => resolve(code ?? 0));
@@ -406,16 +346,16 @@ export class NodeManager {
     });
   }
 
-  // Periodic health ping — parallel pings to all nodes
+  // Parallel health pings with minimal overhead (echo > true — avoids hash lookup)
   private startHealthPing(): void {
     this.healthTimer = setInterval(() => {
       const pings = [...this.connections.entries()]
         .filter(([, conn]) => conn.connected && conn.circuitOpenUntil <= Date.now())
         .map(async ([nodeId]) => {
           const start = Date.now();
-          const result = await this.exec(nodeId, 'true');
+          const result = await this.exec(nodeId, ':');  // ':' is bash builtin — zero fork
           const elapsed = Date.now() - start;
-          if (elapsed > 3000 || result.code !== 0) {
+          if (elapsed > 2000 || result.code !== 0) {
             process.stderr.write(`[health] ${nodeId} degraded (${elapsed}ms)\n`);
           }
         });
@@ -424,14 +364,8 @@ export class NodeManager {
   }
 
   disconnect(): void {
-    if (this.healthTimer) {
-      clearInterval(this.healthTimer);
-      this.healthTimer = null;
-    }
-    for (const conn of this.connections.values()) {
-      conn.client.end();
-      conn.connected = false;
-    }
+    if (this.healthTimer) { clearInterval(this.healthTimer); this.healthTimer = null; }
+    for (const conn of this.connections.values()) { conn.client.end(); conn.connected = false; }
     this.connections.clear();
     this.statusCache.clear();
     this.keyCache.clear();
