@@ -23,7 +23,7 @@ function json(res: ServerResponse, status: number, data: unknown): void {
 
 export function startRESTServer(manager: NodeManager, transfer: TransferEngine, port: number): void {
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Origin', 'http://localhost');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
@@ -62,6 +62,10 @@ export function startRESTServer(manager: NodeManager, transfer: TransferEngine, 
       // POST /api/exec — { node, command } — runs command on remote node via SSH
       if (req.method === 'POST' && path === '/api/exec') {
         const body = JSON.parse(await readBody(req));
+        if (typeof body.node !== 'string' || typeof body.command !== 'string') {
+          json(res, 400, { error: 'Required: { node: string, command: string }' });
+          return;
+        }
         const result = await manager.exec(body.node, body.command);
         json(res, 200, result);
         return;
@@ -70,6 +74,10 @@ export function startRESTServer(manager: NodeManager, transfer: TransferEngine, 
       // POST /api/transfer — { src, dst }
       if (req.method === 'POST' && path === '/api/transfer') {
         const body = JSON.parse(await readBody(req));
+        if (typeof body.src !== 'string' || typeof body.dst !== 'string') {
+          json(res, 400, { error: 'Required: { src: string, dst: string }' });
+          return;
+        }
         const srcParsed = parseMeshPath(body.src);
         const dstParsed = parseMeshPath(body.dst);
         if (!srcParsed || !dstParsed) {

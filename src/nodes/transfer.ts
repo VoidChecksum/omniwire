@@ -146,12 +146,17 @@ export class TransferEngine {
     if (srcClient && dstClient) {
       try {
         return await this.transferSftp(srcClient, dstClient, srcPath, dstPath);
-      } catch {
-        // SFTP failed, fall through to base64 method
+      } catch (sftpErr) {
+        // SFTP failed — only fall through to base64 for small files (< 1MB arg limit)
+        const stat = await this.manager.exec(srcNode, `stat -c%s "${srcPath}" 2>/dev/null || echo 0`);
+        const fileSize = parseInt(stat.stdout.trim()) || 0;
+        if (fileSize > 1_000_000) {
+          throw new Error(`SFTP transfer failed and file too large for base64 fallback (${fileSize} bytes): ${(sftpErr as Error).message}`);
+        }
       }
     }
 
-    // Fallback: base64 over SSH (for local node or SFTP failure)
+    // Fallback: base64 over SSH (for local node or SFTP failure, files < 1MB only)
     const b64Result = await this.manager.exec(srcNode, `base64 "${srcPath}"`);
     if (b64Result.code !== 0) throw new Error(`Failed to encode ${srcPath}: ${b64Result.stderr}`);
 

@@ -144,7 +144,7 @@ export class NodeManager {
         for (const cb of this.reconnectCallbacks) cb(node.id);
       } catch {
         conn.reconnecting = false;
-        // Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s cap
+        // Exponential backoff: 0.5s -> 1s -> 2s -> 4s -> 8s -> 15s cap
         this.reconnectDelays.set(node.id, Math.min(currentDelay * 2, 15_000));
         this.scheduleReconnect(node);
       }

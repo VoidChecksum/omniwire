@@ -30,7 +30,7 @@ function fail(msg: string): { content: [{ type: 'text'; text: string }] } {
 export function createOmniWireServer(manager: NodeManager, transfer: TransferEngine): McpServer {
   const server = new McpServer({
     name: 'omniwire',
-    version: '2.2.0',
+    version: '2.2.1',
   });
 
   const shells = new ShellManager(manager);
@@ -43,13 +43,16 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     'Execute a command on a specific mesh node. Defaults to auto-selecting based on command context.',
     {
       node: z.string().optional().describe('Target node id (windows, contabo, hostinger, thinkpad). Auto-selects if omitted.'),
-      command: z.string().describe('Shell command to run on the remote node via SSH'),
+      command: z.string().optional().describe('Shell command to run on the remote node via SSH'),
       timeout: z.number().optional().describe('Timeout in seconds (default 30)'),
       script: z.string().optional().describe('Multi-line script content. Sent as temp file via SFTP then executed. Use this instead of command for scripts >3 lines to keep tool calls compact.'),
       label: z.string().optional().describe('Short label for the operation (shown in tool call UI instead of full command). Max 60 chars.'),
     },
     // Remote SSH2 execution â manager.exec() uses ssh2 client.exec(), not child_process
     async ({ node, command, timeout, script, label }) => {
+      if (!command && !script) {
+        return fail('Error: either command or script is required');
+      }
       const nodeId = node ?? 'contabo';
       const timeoutSec = timeout ?? 30;
 
@@ -58,12 +61,11 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       if (script) {
         // Multi-line script: write to temp file via SSH, execute, clean up
         const tmpFile = `/tmp/.ow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const escaped = script.replace(/'/g, "'\\''");
-        effectiveCmd = `cat << 'OMNIWIRE_SCRIPT_EOF' > ${tmpFile}\n${script}\nOMNIWIRE_SCRIPT_EOF\nchmod +x ${tmpFile} && ${tmpFile}; _rc=$?; rm -f ${tmpFile}; exit $_rc`;
+        effectiveCmd = `cat << 'OMNIWIRE_SCRIPT_EOF' > ${tmpFile}\n${script}\nOMNIWIRE_SCRIPT_EOF\nchmod +x ${tmpFile} && timeout ${timeoutSec} ${tmpFile}; _rc=$?; rm -f ${tmpFile}; exit $_rc`;
       } else {
         effectiveCmd = timeoutSec < 300
-          ? `timeout ${timeoutSec} bash -c '${command.replace(/'/g, "'\\''")}'`
-          : command;
+          ? `timeout ${timeoutSec} bash -c '${command!.replace(/'/g, "'\\''")}'`
+          : command!;
       }
 
       const result = await manager.exec(nodeId, effectiveCmd);
@@ -72,7 +74,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         : result.code === 124
           ? `Timeout after ${timeoutSec}s: ${result.stdout || '(no output)'}`
           : `Error (exit ${result.code}): ${result.stderr}`;
-      return { content: [{ type: 'text', text: `[${nodeId}] (${result.durationMs}ms)\n${output}` }] };
+      return ok(nodeId, result.durationMs, output, label ?? undefined);
     }
   );
 
@@ -523,9 +525,13 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       const session = await shells.openShell(node);
       const channel = shells.getChannel(session.id)!;
 
-      // Set up listener BEFORE writing commands to avoid missing output
+      // Set up ALL listeners BEFORE writing commands to avoid race conditions
       let output = '';
       channel.on('data', (data: Buffer) => { output += data.toString(); });
+      const closePromise = new Promise<void>((resolve) => {
+        channel.on('close', () => resolve());
+        setTimeout(resolve, 15000);
+      });
 
       // Small delay for login banner
       await new Promise((r) => setTimeout(r, 100));
@@ -535,11 +541,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       }
       channel.write('exit\n');
 
-      await new Promise<void>((resolve) => {
-        channel.on('close', () => resolve());
-        setTimeout(resolve, 15000);
-      });
-
+      await closePromise;
       shells.closeShell(session.id);
       return { content: [{ type: 'text', text: `[${node}] persistent shell\n${output}` }] };
     }

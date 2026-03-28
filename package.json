@@ -1,6 +1,6 @@
 {
   "name": "omniwire",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "OmniWire Terminal \u00e2\u20ac\u201d unified mesh control layer with MCP server (30 tools) + CyberSync daemon",
   "type": "module",
   "bin": {
