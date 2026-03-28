@@ -341,6 +341,29 @@ omniwire --stdio --no-sync               # MCP without CyberSync
 
 ## Changelog
 
+### v2.2.1 — Security & Bug Fixes
+
+**omniwire_exec**
+- `command` is now optional when `script` is provided — previously rejected valid script-only calls
+- Scripts now respect the `timeout` parameter — previously scripts could run indefinitely
+- Removed unused `escaped` variable (dead code cleanup)
+- Output now uses the compact `ok()` helper with label support
+
+**omniwire_shell**
+- Fixed race condition: close listener is now registered before writing commands, preventing spurious 15s timeouts on fast-completing commands
+
+**transfer**
+- Added size guard on base64 fallback — files >1MB no longer silently fail with `ARG_MAX` overflow
+
+**REST API**
+- CORS restricted from `*` to `http://localhost` — prevents cross-origin command execution from browser tabs
+- Added input validation on `/api/exec` and `/api/transfer` endpoints
+
+**Reconnect backoff**
+- Fixed misleading comment: actual cap is 15s (comment previously said 30s)
+
+---
+
 ### v2.1.0 — Multi-Path Failover & Performance
 
 **Connectivity**
