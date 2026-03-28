@@ -1,35 +1,46 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=venom&color=0:0A0E14,50:0D1B2A,100:1B2838&height=220&section=header&text=OmniWire&fontSize=80&fontColor=59C2FF&animation=fadeIn&fontAlignY=32&desc=Multi-Agent%20Mesh%20Control%20%E2%80%94%2053%20MCP%20Tools%20%C2%B7%20A2A%20Protocol%20%C2%B7%20~80ms%20Latency&descSize=16&descColor=8B949E&descAlignY=58" />
-    <source media="(prefers-color-scheme: light)" srcset="https://capsule-render.vercel.app/api?type=venom&color=0:E8EAED,50:D4D8DE,100:59C2FF&height=220&section=header&text=OmniWire&fontSize=80&fontColor=0A0E14&animation=fadeIn&fontAlignY=32&desc=Multi-Agent%20Mesh%20Control%20%E2%80%94%2053%20MCP%20Tools%20%C2%B7%20A2A%20Protocol%20%C2%B7%20~80ms%20Latency&descSize=16&descColor=586069&descAlignY=58" />
-    <img alt="OmniWire" src="https://capsule-render.vercel.app/api?type=venom&color=0:0A0E14,50:0D1B2A,100:1B2838&height=220&section=header&text=OmniWire&fontSize=80&fontColor=59C2FF&animation=fadeIn&fontAlignY=32&desc=Multi-Agent%20Mesh%20Control%20%E2%80%94%2053%20MCP%20Tools%20%C2%B7%20A2A%20Protocol%20%C2%B7%20~80ms%20Latency&descSize=16&descColor=8B949E&descAlignY=58" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:0D1117,25:0D1B2A,50:162B44,75:1A3A5C,100:59C2FF&height=200&section=header&text=⚡%20OmniWire&fontSize=72&fontColor=59C2FF&animation=twinkling&fontAlignY=35&desc=Infrastructure%20Layer%20for%20AI%20Agent%20Swarms&descSize=18&descColor=8B949E&descAlignY=60" />
+    <source media="(prefers-color-scheme: light)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:FFFFFF,25:F0F4F8,50:D8E2EE,75:B8CCE0,100:59C2FF&height=200&section=header&text=⚡%20OmniWire&fontSize=72&fontColor=0D1117&animation=twinkling&fontAlignY=35&desc=Infrastructure%20Layer%20for%20AI%20Agent%20Swarms&descSize=18&descColor=586069&descAlignY=60" />
+    <img alt="OmniWire" src="https://capsule-render.vercel.app/api?type=waving&color=0:0D1117,25:0D1B2A,50:162B44,75:1A3A5C,100:59C2FF&height=200&section=header&text=⚡%20OmniWire&fontSize=72&fontColor=59C2FF&animation=twinkling&fontAlignY=35&desc=Infrastructure%20Layer%20for%20AI%20Agent%20Swarms&descSize=18&descColor=8B949E&descAlignY=60" />
   </picture>
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0A0E14" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP-53_tools-59C2FF?style=for-the-badge&labelColor=0A0E14" alt="tools" />
-  <img src="https://img.shields.io/badge/A2A-protocol-00C853?style=for-the-badge&labelColor=0A0E14" alt="A2A" />
-  <img src="https://img.shields.io/badge/latency-~80ms-FF6D00?style=for-the-badge&labelColor=0A0E14" alt="latency" />
-  <img src="https://img.shields.io/badge/lz4-transfer-CC93E6?style=for-the-badge&labelColor=0A0E14" alt="lz4" />
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8B949E?style=for-the-badge&labelColor=0A0E14" alt="license" /></a>
+  <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0D1117" alt="npm" /></a>
+  <img src="https://img.shields.io/badge/MCP_Tools-53-59C2FF?style=for-the-badge&logo=lightning&logoColor=59C2FF&labelColor=0D1117" alt="tools" />
+  <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&logo=link&logoColor=00C853&labelColor=0D1117" alt="A2A" />
+  <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&logo=bolt&logoColor=FF6D00&labelColor=0D1117" alt="latency" />
+  <img src="https://img.shields.io/badge/LZ4-Transfer-CC93E6?style=for-the-badge&logo=files&logoColor=CC93E6&labelColor=0D1117" alt="lz4" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-8B949E?style=for-the-badge&logo=gnu&logoColor=8B949E&labelColor=0D1117" alt="license" /></a>
 </p>
 
 <br/>
 
-<p align="center">
-  <b>The infrastructure layer for AI agent swarms.</b>
-</p>
+<div align="center">
 
-<p align="center">
-53 MCP tools &bull; Agent-to-Agent messaging &bull; Distributed task queues &bull; Capability routing<br/>
-AES-128-GCM SSH2 &bull; LZ4 transfers &bull; Circuit breakers &bull; Multi-path failover<br/>
-Session chaining &bull; Pipeline DAGs &bull; Blackboard architecture &bull; Event pub/sub
-</p>
+**53 MCP tools** · **Agent-to-Agent messaging** · **Distributed task queues** · **Capability routing**
+
+AES-128-GCM SSH2 · LZ4 transfers · Circuit breakers · Multi-path failover · Pipeline DAGs · Blackboard architecture
+
+</div>
 
 <br/>
 
-> **v2.5** &mdash; AES-128-GCM cipher preference, 2s keepalive, LZ4 compression, `shuf` port finder, SFTP-first reads, agent registry, blackboard, task queues, capability routing. See [changelog](#changelog).
+<div align="center">
+<table>
+<tr>
+<td align="center">⚡ <b>~80ms</b><br/><sub>exec latency</sub></td>
+<td align="center">🔧 <b>53</b><br/><sub>MCP tools</sub></td>
+<td align="center">🔗 <b>A2A</b><br/><sub>agent protocol</sub></td>
+<td align="center">📦 <b>LZ4</b><br/><sub>fast transfer</sub></td>
+<td align="center">🛡️ <b>AES-128</b><br/><sub>GCM cipher</sub></td>
+<td align="center">🔄 <b>300ms</b><br/><sub>reconnect</sub></td>
+</tr>
+</table>
+</div>
+
+> **v2.5** &mdash; AES-128-GCM cipher, 2s keepalive, LZ4 compression, SFTP-first reads, agent registry, blackboard, task queues, capability routing. [Changelog →](#changelog)
 
 <br/>
 
@@ -117,13 +128,13 @@ graph TB
     POOL -->|"local exec"| N4
     CSYNC --> DB
 
-    style omniwire fill:#0A0E14,stroke:#59C2FF,stroke-width:2px,color:#C6D0E1
-    style clients fill:#1A1F2E,stroke:#91B362,stroke-width:1px,color:#C6D0E1
-    style mesh fill:#1A1F2E,stroke:#E6B450,stroke-width:1px,color:#C6D0E1
-    style tools fill:#141922,stroke:#59C2FF,stroke-width:1px,color:#C6D0E1
-    style engine fill:#141922,stroke:#CC93E6,stroke-width:1px,color:#C6D0E1
-    style MCP fill:#1A1F2E,stroke:#59C2FF,color:#59C2FF
-    style DB fill:#1A1F2E,stroke:#CC93E6,color:#CC93E6
+    style omniwire fill:#0D1117,stroke:#59C2FF,stroke-width:2px,color:#C6D0E1
+    style clients fill:#161B22,stroke:#91B362,stroke-width:1px,color:#C6D0E1
+    style mesh fill:#161B22,stroke:#E6B450,stroke-width:1px,color:#C6D0E1
+    style tools fill:#0D1117,stroke:#59C2FF,stroke-width:1px,color:#C6D0E1
+    style engine fill:#0D1117,stroke:#CC93E6,stroke-width:1px,color:#C6D0E1
+    style MCP fill:#162B44,stroke:#59C2FF,color:#59C2FF
+    style DB fill:#162B44,stroke:#CC93E6,color:#CC93E6
 ```
 
 ---
@@ -454,14 +465,16 @@ omniwire/
 
 ---
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-E6B450?style=flat-square&labelColor=0A0E14" alt="MIT License" /></a>
-</p>
+<br/>
+
+<div align="center">
+  <sub>Built for the machines that build for us.</sub>
+</div>
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:0A0E14,50:1A1F2E,100:59C2FF&height=100&section=footer" />
-    <source media="(prefers-color-scheme: light)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:E8EAED,50:D4D8DE,100:59C2FF&height=100&section=footer" />
-    <img alt="footer" src="https://capsule-render.vercel.app/api?type=waving&color=0:0A0E14,50:1A1F2E,100:59C2FF&height=100&section=footer" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:59C2FF,50:162B44,100:0D1117&height=120&section=footer" />
+    <source media="(prefers-color-scheme: light)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:59C2FF,50:B8CCE0,100:FFFFFF&height=120&section=footer" />
+    <img alt="footer" src="https://capsule-render.vercel.app/api?type=waving&color=0:59C2FF,50:162B44,100:0D1117&height=120&section=footer" />
   </picture>
 </p>
