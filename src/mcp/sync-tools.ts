@@ -269,67 +269,78 @@ export function registerSyncTools(
     }
   );
 
-  // -- Cookie Management --
-  const cookieMgr = new CookieManager(db, manager, transfer);
+  // --- Tool 35: omniwire_cookies ---
   server.tool(
     'omniwire_cookies',
-    'Manage browser cookies: store, retrieve, convert (JSON/Header/Netscape), sync to nodes.',
+    'Manage browser cookies across mesh nodes. Store/retrieve/import/export in json/header/netscape format and sync to remote nodes via SSH.',
     {
-      action: z.enum(['set', 'get', 'list', 'delete', 'import', 'export', 'sync']).describe('Action'),
-      domain: z.string().optional().describe('Cookie domain'),
-      cookies: z.string().optional().describe('Cookie data'),
-      format: z.enum(['json', 'header', 'netscape']).optional().describe('Format (default: json)'),
-      nodes: z.array(z.string()).optional().describe('Target nodes for sync'),
+      action: z.enum(['set', 'get', 'list', 'delete', 'import', 'export', 'sync']).describe('Action to perform'),
+      domain: z.string().optional().describe('Cookie domain (required for set/get/delete/sync/export)'),
+      cookies: z.string().optional().describe('Cookie data: JSON array for set, raw string for import'),
+      format: z.enum(['json', 'header', 'netscape']).optional().describe('Cookie format (default: json)'),
+      nodes: z.array(z.string()).optional().describe('Target node ids for sync (all online if omitted)'),
     },
-    async ({ action, domain, cookies: cookieData, format: fmt, nodes: targetNodes }) => {
-      const format = (fmt ?? 'json') as CookieFormat;
+    async ({ action, domain, cookies: cookieData, format, nodes: targetNodes }) => {
+      const cookieMgr = new CookieManager(db, manager, transfer);
+      const fmt = (format ?? 'json') as CookieFormat;
       switch (action) {
-        case 'set': {
-          if (!domain || !cookieData) return { content: [{ type: 'text', text: 'Error: domain and cookies required' }] };
-          const parsed = parseCookies(cookieData, format, domain);
-          await cookieMgr.set(domain, parsed, 'manual');
-          return { content: [{ type: 'text', text: 'Stored ' + String(parsed.length) + ' cookies for ' + domain }] };
-        }
-        case 'get': {
-          if (!domain) return { content: [{ type: 'text', text: 'Error: domain required' }] };
-          const result = await cookieMgr.get(domain, format);
-          return { content: [{ type: 'text', text: result ?? 'No cookies for ' + domain }] };
-        }
         case 'list': {
           const jars = await cookieMgr.list();
-          if (jars.length === 0) return { content: [{ type: 'text', text: 'No cookies stored' }] };
-          const lines = jars.map((j) => '  ' + j.domain + ': ' + j.count + ' cookies');
-          return { content: [{ type: 'text', text: 'Cookie jars:\n' + lines.join('\n') }] };
+          if (jars.length === 0) {
+            return { content: [{ type: 'text', text: 'No cookie jars stored.' }] };
+          }
+          const lines = jars.map((j) =>
+            '  ' + j.domain + ': ' + j.count + ' cookies, updated=' + j.updatedAt + (j.source ? ', source=' + j.source : '')
+          );
+          return { content: [{ type: 'text', text: jars.length + ' cookie jar(s):\n' + lines.join('\n') }] };
+        }
+        case 'get': {
+          if (!domain) return { content: [{ type: 'text', text: 'Error: domain is required for get' }] };
+          const result = await cookieMgr.get(domain, fmt);
+          if (!result) return { content: [{ type: 'text', text: 'No cookies found for ' + domain }] };
+          return { content: [{ type: 'text', text: result }] };
+        }
+        case 'set': {
+          if (!domain) return { content: [{ type: 'text', text: 'Error: domain is required for set' }] };
+          if (!cookieData) return { content: [{ type: 'text', text: 'Error: cookies is required for set' }] };
+          const parsed = parseCookies(cookieData, fmt, domain);
+          await cookieMgr.set(domain, parsed);
+          return { content: [{ type: 'text', text: 'Stored ' + parsed.length + ' cookie(s) for ' + domain }] };
         }
         case 'delete': {
-          if (!domain) return { content: [{ type: 'text', text: 'Error: domain required' }] };
+          if (!domain) return { content: [{ type: 'text', text: 'Error: domain is required for delete' }] };
           await cookieMgr.delete(domain);
           return { content: [{ type: 'text', text: 'Deleted cookies for ' + domain }] };
         }
         case 'import': {
-          if (!cookieData) return { content: [{ type: 'text', text: 'Error: cookies data required' }] };
-          const results = await cookieMgr.import(cookieData, format, domain);
-          const lines = Object.entries(results).map(([d, n]) => '  ' + d + ': ' + n + ' cookies');
-          return { content: [{ type: 'text', text: 'Imported:\n' + lines.join('\n') }] };
+          if (!cookieData) return { content: [{ type: 'text', text: 'Error: cookies is required for import' }] };
+          const results = await cookieMgr.import(cookieData, fmt, domain);
+          const lines = Object.entries(results).map(([d, n]) => '  ' + d + ': ' + n + ' cookie(s)');
+          return { content: [{ type: 'text', text: 'Imported cookies:\n' + lines.join('\n') }] };
         }
         case 'export': {
-          if (!domain) return { content: [{ type: 'text', text: 'Error: domain required' }] };
-          const result = await cookieMgr.get(domain, format);
-          return { content: [{ type: 'text', text: result ?? 'No cookies for ' + domain }] };
+          if (!domain) return { content: [{ type: 'text', text: 'Error: domain is required for export' }] };
+          const result = await cookieMgr.get(domain, fmt);
+          if (!result) return { content: [{ type: 'text', text: 'No cookies found for ' + domain }] };
+          return { content: [{ type: 'text', text: result }] };
         }
         case 'sync': {
+          if (!manager) return { content: [{ type: 'text', text: 'Error: node manager not available' }] };
           if (domain) {
             const results = await cookieMgr.syncToNodes(domain, targetNodes);
             const lines = Object.entries(results).map(([n, ok]) => '  ' + n + ': ' + (ok ? 'OK' : 'FAILED'));
-            return { content: [{ type: 'text', text: 'Synced ' + domain + ':\n' + lines.join('\n') }] };
+            return { content: [{ type: 'text', text: 'Synced ' + domain + ' to nodes:\n' + lines.join('\n') }] };
+          } else {
+            const allResults = await cookieMgr.syncAllToNodes(targetNodes);
+            const lines = Object.entries(allResults).flatMap(([dom, nodeResults]) =>
+              Object.entries(nodeResults).map(([n, ok]) => '  ' + dom + ' -> ' + n + ': ' + (ok ? 'OK' : 'FAILED'))
+            );
+            return { content: [{ type: 'text', text: lines.length ? lines.join('\n') : 'No cookie jars to sync.' }] };
           }
-          const { synced, failed } = await cookieMgr.syncAllToNodes(targetNodes);
-          return { content: [{ type: 'text', text: 'Cookie sync: ' + synced + ' OK, ' + failed + ' failed' }] };
         }
         default:
           return { content: [{ type: 'text', text: 'Unknown action: ' + action }] };
       }
     }
   );
-
 }
