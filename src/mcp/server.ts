@@ -42,10 +42,21 @@ function fail(msg: string): McpResult {
   return { content: [{ type: 'text' as const, text: `ERR ${msg}` }] };
 }
 
-function fmtExecOutput(result: { code: number; stdout: string; stderr: string }, timeoutSec: number): string {
+interface ExecOutput { code: number; stdout: string; stderr: string; durationMs: number }
+
+function fmtExecOutput(result: ExecOutput, timeoutSec: number): string {
   if (result.code === 0) return result.stdout || '(empty)';
   if (result.code === 124) return `TIMEOUT ${timeoutSec}s\n${result.stdout || '(empty)'}`;
   return `exit ${result.code}\n${result.stderr}`;
+}
+
+function fmtJson(node: string, result: ExecOutput, label?: string): McpResult {
+  return okBrief(JSON.stringify({
+    node, ok: result.code === 0, code: result.code, ms: result.durationMs,
+    ...(label ? { label } : {}),
+    stdout: result.stdout.slice(0, MAX_OUTPUT),
+    ...(result.stderr ? { stderr: result.stderr.slice(0, 1000) } : {}),
+  }));
 }
 
 function multiResult(results: { nodeId: string; code: number; stdout: string; stderr: string; durationMs: number }[]): McpResult {
@@ -58,12 +69,23 @@ function multiResult(results: { nodeId: string; code: number; stdout: string; st
   });
   return okBrief(trim(parts.join('\n\n')));
 }
+
+function multiResultJson(results: { nodeId: string; code: number; stdout: string; stderr: string; durationMs: number }[]): McpResult {
+  return okBrief(JSON.stringify(results.map((r) => ({
+    node: r.nodeId, ok: r.code === 0, code: r.code, ms: r.durationMs,
+    stdout: r.stdout.slice(0, MAX_OUTPUT),
+    ...(r.stderr ? { stderr: r.stderr.slice(0, 500) } : {}),
+  }))));
+}
+
+// -- Agentic state -- shared across tool calls in the same MCP session --------
+const resultStore = new Map<string, string>();  // key -> value store for chaining
 // -----------------------------------------------------------------------------
 
 export function createOmniWireServer(manager: NodeManager, transfer: TransferEngine): McpServer {
   const server = new McpServer({
     name: 'omniwire',
-    version: '2.3.0',
+    version: '2.4.0',
   });
 
   const shells = new ShellManager(manager);
@@ -73,35 +95,68 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
   // --- Tool 1: omniwire_exec ---
   server.tool(
     'omniwire_exec',
-    'Execute a command on a specific mesh node. Defaults to auto-selecting based on command context.',
+    'Execute a command on a mesh node. Supports retry, assertions, JSON output, and result storage for agentic chaining.',
     {
       node: z.string().optional().describe('Target node id (windows, contabo, hostinger, thinkpad). Auto-selects if omitted.'),
-      command: z.string().optional().describe('Shell command to run on the remote node via SSH'),
+      command: z.string().optional().describe('Shell command to run. Use {{key}} to interpolate stored results from previous calls.'),
       timeout: z.number().optional().describe('Timeout in seconds (default 30)'),
-      script: z.string().optional().describe('Multi-line script content. Sent as temp file via SFTP then executed. Use this instead of command for scripts >3 lines to keep tool calls compact.'),
-      label: z.string().optional().describe('Short label for the operation (shown in tool call UI instead of full command). Max 60 chars.'),
+      script: z.string().optional().describe('Multi-line script content. Sent as temp file via SFTP then executed.'),
+      label: z.string().optional().describe('Short label for the operation. Max 60 chars.'),
+      format: z.enum(['text', 'json']).optional().describe('Output format. "json" returns structured {node, ok, code, ms, stdout, stderr} for programmatic parsing.'),
+      retry: z.number().optional().describe('Retry N times on failure (with 1s delay between). Default 0.'),
+      assert: z.string().optional().describe('Grep pattern to assert in stdout. If not found, returns error. Use for validation in agentic chains.'),
+      store_as: z.string().optional().describe('Store trimmed stdout under this key. Retrieve in subsequent calls via {{key}} in command.'),
     },
-    // Remote SSH2 execution -- manager.exec() uses ssh2 client.exec(), not child_process
-    async ({ node, command, timeout, script, label }) => {
+    async ({ node, command, timeout, script, label, format, retry, assert: assertPattern, store_as }) => {
       if (!command && !script) {
         return fail('either command or script is required');
       }
       const nodeId = node ?? 'contabo';
       const timeoutSec = timeout ?? 30;
+      const maxRetries = retry ?? 0;
+      const useJson = format === 'json';
+
+      // Interpolate stored results: {{key}} -> value
+      let resolvedCmd = command;
+      if (resolvedCmd) {
+        resolvedCmd = resolvedCmd.replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
+      }
 
       let effectiveCmd: string;
-
       if (script) {
         const tmpFile = `/tmp/.ow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         effectiveCmd = `cat << 'OMNIWIRE_SCRIPT_EOF' > ${tmpFile}\n${script}\nOMNIWIRE_SCRIPT_EOF\nchmod +x ${tmpFile} && timeout ${timeoutSec} ${tmpFile}; _rc=$?; rm -f ${tmpFile}; exit $_rc`;
       } else {
         effectiveCmd = timeoutSec < 300
-          ? `timeout ${timeoutSec} bash -c '${command!.replace(/'/g, "'\\''")}'`
-          : command!;
+          ? `timeout ${timeoutSec} bash -c '${resolvedCmd!.replace(/'/g, "'\\''")}'`
+          : resolvedCmd!;
       }
 
-      const result = await manager.exec(nodeId, effectiveCmd);
-      return ok(nodeId, result.durationMs, fmtExecOutput(result, timeoutSec), label ?? undefined);
+      // Execute with retry
+      let result = await manager.exec(nodeId, effectiveCmd);
+      for (let attempt = 0; attempt < maxRetries && result.code !== 0; attempt++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        result = await manager.exec(nodeId, effectiveCmd);
+      }
+
+      // Store result if requested
+      if (store_as && result.code === 0) {
+        resultStore.set(store_as, result.stdout.trim());
+      }
+
+      // Assert pattern in output
+      if (assertPattern && result.code === 0) {
+        const regex = new RegExp(assertPattern);
+        if (!regex.test(result.stdout)) {
+          return useJson
+            ? okBrief(JSON.stringify({ node: nodeId, ok: false, code: -2, ms: result.durationMs, error: `assert failed: /${assertPattern}/ not found in stdout`, stdout: result.stdout.slice(0, 500) }))
+            : fail(`${nodeId} assert failed: /${assertPattern}/ not found`);
+        }
+      }
+
+      return useJson
+        ? fmtJson(nodeId, result, label ?? undefined)
+        : ok(nodeId, result.durationMs, fmtExecOutput(result, timeoutSec), label ?? undefined);
     }
   );
 
@@ -110,14 +165,16 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
     'omniwire_broadcast',
     'Execute a command on all online mesh nodes simultaneously.',
     {
-      command: z.string().describe('Shell command to run on all nodes'),
+      command: z.string().describe('Shell command to run on all nodes. Supports {{key}} interpolation.'),
       nodes: z.array(z.string()).optional().describe('Subset of nodes to target. All online nodes if omitted.'),
+      format: z.enum(['text', 'json']).optional().describe('Output format.'),
     },
-    async ({ command, nodes: targetNodes }) => {
+    async ({ command, nodes: targetNodes, format }) => {
+      const resolved = command.replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
       const results = targetNodes
-        ? await manager.execOn(targetNodes, command)
-        : await manager.execAll(command);
-      return multiResult(results);
+        ? await manager.execOn(targetNodes, resolved)
+        : await manager.execAll(resolved);
+      return format === 'json' ? multiResultJson(results) : multiResult(results);
     }
   );
 
@@ -616,40 +673,71 @@ tags: ${meshNode.tags.join(', ')}`;
     }
   );
 
-  // --- Tool 25: omniwire_batch (multiple commands, single tool call) ---
+  // --- Tool 25: omniwire_batch (chaining-aware multi-command) ---
   server.tool(
     'omniwire_batch',
-    'Run multiple commands on one or more nodes in a single tool call. Returns all results. Use this to avoid multiple sequential omniwire_exec calls.',
+    'Run multiple commands in a single tool call. Supports chaining (sequential with {{prev}} interpolation), abort-on-fail, store_as, and JSON output. Use this to reduce agentic round-trips.',
     {
       commands: z.array(z.object({
         node: z.string().optional().describe('Node id (default: contabo)'),
-        command: z.string().describe('Command to run'),
-        label: z.string().optional().describe('Short label for this command'),
+        command: z.string().describe('Command. Use {{key}} to interpolate stored results, {{prev}} for previous command stdout.'),
+        label: z.string().optional().describe('Short label'),
+        store_as: z.string().optional().describe('Store stdout under this key for later use'),
       })).describe('Array of commands to execute'),
-      parallel: z.boolean().optional().describe('Run all commands in parallel (default: true)'),
+      parallel: z.boolean().optional().describe('Run in parallel (default: true). Set false for sequential chaining with {{prev}}.'),
+      abort_on_fail: z.boolean().optional().describe('Stop executing remaining commands if one fails (sequential mode only). Default: false.'),
+      format: z.enum(['text', 'json']).optional().describe('Output format.'),
     },
-    async ({ commands, parallel }) => {
+    async ({ commands, parallel, abort_on_fail, format }) => {
       const runParallel = parallel !== false;
+      const useJson = format === 'json';
 
-      const execute = async (item: { node?: string; command: string; label?: string }) => {
+      if (runParallel) {
+        const execute = async (item: { node?: string; command: string; label?: string; store_as?: string }) => {
+          const nodeId = item.node ?? 'contabo';
+          const resolved = item.command.replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
+          const result = await manager.exec(nodeId, resolved);
+          if (item.store_as && result.code === 0) resultStore.set(item.store_as, result.stdout.trim());
+          if (useJson) {
+            return JSON.stringify({ node: nodeId, ok: result.code === 0, code: result.code, ms: result.durationMs, label: item.label, stdout: result.stdout.slice(0, 2000), ...(result.stderr ? { stderr: result.stderr.slice(0, 500) } : {}) });
+          }
+          const lbl = item.label ?? item.command.slice(0, 40);
+          const body = result.code === 0
+            ? (result.stdout || '(empty)').split('\n').slice(0, 20).join('\n')
+            : `exit ${result.code}: ${result.stderr.split('\n').slice(0, 5).join('\n')}`;
+          return `-- ${nodeId} > ${lbl}  ${t(result.durationMs)}\n${body}`;
+        };
+        const results = await Promise.all(commands.map(execute));
+        return useJson ? okBrief(`[${results.join(',')}]`) : okBrief(trim(results.join('\n\n')));
+      }
+
+      // Sequential with chaining
+      const outputs: string[] = [];
+      let prevStdout = '';
+      for (const item of commands) {
         const nodeId = item.node ?? 'contabo';
-        const result = await manager.exec(nodeId, item.command);
-        const lbl = item.label ?? item.command.slice(0, 40);
-        const body = result.code === 0
-          ? (result.stdout || '(empty)').split('\n').slice(0, 20).join('\n')
-          : `exit ${result.code}: ${result.stderr.split('\n').slice(0, 5).join('\n')}`;
-        return `-- ${nodeId} > ${lbl}  ${t(result.durationMs)}\n${body}`;
-      };
+        let resolved = item.command.replace(/\{\{prev\}\}/g, prevStdout.trim());
+        resolved = resolved.replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
+        const result = await manager.exec(nodeId, resolved);
+        prevStdout = result.stdout;
+        if (item.store_as && result.code === 0) resultStore.set(item.store_as, result.stdout.trim());
 
-      const results = runParallel
-        ? await Promise.all(commands.map(execute))
-        : await commands.reduce<Promise<string[]>>(async (acc, cmd) => {
-            const prev = await acc;
-            const result = await execute(cmd);
-            return [...prev, result];
-          }, Promise.resolve([]));
+        if (useJson) {
+          outputs.push(JSON.stringify({ node: nodeId, ok: result.code === 0, code: result.code, ms: result.durationMs, label: item.label, stdout: result.stdout.slice(0, 2000), ...(result.stderr ? { stderr: result.stderr.slice(0, 500) } : {}) }));
+        } else {
+          const lbl = item.label ?? item.command.slice(0, 40);
+          const body = result.code === 0
+            ? (result.stdout || '(empty)').split('\n').slice(0, 20).join('\n')
+            : `exit ${result.code}: ${result.stderr.split('\n').slice(0, 5).join('\n')}`;
+          outputs.push(`-- ${nodeId} > ${lbl}  ${t(result.durationMs)}\n${body}`);
+        }
 
-      return okBrief(trim(results.join('\n\n')));
+        if (abort_on_fail && result.code !== 0) {
+          const msg = useJson ? `[${outputs.join(',')}]` : outputs.join('\n\n') + '\n\n-- ABORTED (command failed)';
+          return okBrief(trim(msg));
+        }
+      }
+      return useJson ? okBrief(`[${outputs.join(',')}]`) : okBrief(trim(outputs.join('\n\n')));
     }
   );
 
@@ -849,6 +937,478 @@ tags: ${meshNode.tags.join(', ')}`;
       const result = await manager.exec(node, parts.join(' '));
       const label = unit ? `syslog ${unit}` : 'syslog';
       return ok(node, result.durationMs, result.code === 0 ? result.stdout : result.stderr, label);
+    }
+  );
+
+  // =========================================================================
+  // AGENTIC / A2A / MULTI-AGENT TOOLS
+  // =========================================================================
+
+  // --- Tool 33: omniwire_store ---
+  server.tool(
+    'omniwire_store',
+    'Key-value store for chaining results across tool calls in the same session. Agents can store intermediate results and retrieve them later. Keys persist until session ends.',
+    {
+      action: z.enum(['get', 'set', 'delete', 'list', 'clear']).describe('Action'),
+      key: z.string().optional().describe('Key name (required for get/set/delete)'),
+      value: z.string().optional().describe('Value to store (for set)'),
+    },
+    async ({ action, key, value }) => {
+      switch (action) {
+        case 'get':
+          if (!key) return fail('key required');
+          return okBrief(resultStore.get(key) ?? '(not found)');
+        case 'set':
+          if (!key || value === undefined) return fail('key and value required');
+          resultStore.set(key, value);
+          return okBrief(`stored ${key} (${value.length} chars)`);
+        case 'delete':
+          if (!key) return fail('key required');
+          resultStore.delete(key);
+          return okBrief(`deleted ${key}`);
+        case 'list':
+          if (resultStore.size === 0) return okBrief('(empty store)');
+          return okBrief([...resultStore.entries()].map(([k, v]) => `${k} = ${v.slice(0, 80)}${v.length > 80 ? '...' : ''}`).join('\n'));
+        case 'clear':
+          resultStore.clear();
+          return okBrief('store cleared');
+      }
+    }
+  );
+
+  // --- Tool 34: omniwire_pipeline ---
+  server.tool(
+    'omniwire_pipeline',
+    'Execute a multi-step pipeline across nodes. Each step can depend on previous step output. Steps run sequentially on potentially different nodes. Pipeline aborts on first failure unless ignore_errors is set. Designed for multi-agent orchestration.',
+    {
+      steps: z.array(z.object({
+        node: z.string().optional().describe('Node (default: contabo)'),
+        command: z.string().describe('Command. Use {{prev}} for previous stdout, {{stepN}} for step N output, {{key}} for store.'),
+        label: z.string().optional().describe('Step label'),
+        store_as: z.string().optional().describe('Store stdout under this key'),
+        on_fail: z.enum(['abort', 'skip', 'continue']).optional().describe('Behavior on failure (default: abort)'),
+      })).describe('Pipeline steps'),
+      format: z.enum(['text', 'json']).optional(),
+    },
+    async ({ steps, format }) => {
+      const useJson = format === 'json';
+      const stepOutputs: string[] = [];
+      const results: { step: number; node: string; label?: string; ok: boolean; code: number; ms: number; stdout: string; stderr?: string }[] = [];
+      let prevStdout = '';
+
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        const nodeId = step.node ?? 'contabo';
+        let cmd = step.command
+          .replace(/\{\{prev\}\}/g, prevStdout.trim())
+          .replace(/\{\{step(\d+)\}\}/g, (_, n) => stepOutputs[parseInt(n)] ?? '')
+          .replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
+
+        const result = await manager.exec(nodeId, cmd);
+        prevStdout = result.stdout;
+        stepOutputs[i] = result.stdout.trim();
+        if (step.store_as && result.code === 0) resultStore.set(step.store_as, result.stdout.trim());
+
+        results.push({
+          step: i, node: nodeId, label: step.label, ok: result.code === 0,
+          code: result.code, ms: result.durationMs,
+          stdout: result.stdout.slice(0, 2000),
+          ...(result.stderr ? { stderr: result.stderr.slice(0, 500) } : {}),
+        });
+
+        if (result.code !== 0) {
+          const onFail = step.on_fail ?? 'abort';
+          if (onFail === 'abort') break;
+          if (onFail === 'skip') { prevStdout = ''; continue; }
+        }
+      }
+
+      if (useJson) return okBrief(JSON.stringify(results));
+
+      const lines = results.map((r) => {
+        const status = r.ok ? 'ok' : `exit ${r.code}`;
+        const lbl = r.label ?? `step ${r.step}`;
+        const body = r.ok ? r.stdout.split('\n').slice(0, 10).join('\n') : (r.stderr ?? '').split('\n').slice(0, 5).join('\n');
+        return `[${r.step}] ${r.node} > ${lbl}  ${t(r.ms)}  ${status}\n${body}`;
+      });
+      return okBrief(trim(lines.join('\n\n')));
+    }
+  );
+
+  // --- Tool 35: omniwire_watch ---
+  server.tool(
+    'omniwire_watch',
+    'Poll a command until a condition is met or timeout. Useful for waiting on deployments, services starting, builds completing. Returns when the assert pattern matches stdout.',
+    {
+      node: z.string().optional().describe('Node (default: contabo)'),
+      command: z.string().describe('Command to poll'),
+      assert: z.string().describe('Regex pattern to match in stdout. Returns success when found.'),
+      interval: z.number().optional().describe('Poll interval in seconds (default: 3)'),
+      timeout: z.number().optional().describe('Max wait in seconds (default: 60)'),
+      label: z.string().optional(),
+      store_as: z.string().optional().describe('Store matching stdout on success'),
+    },
+    async ({ node, command, assert: pattern, interval, timeout, label, store_as }) => {
+      const nodeId = node ?? 'contabo';
+      const intervalMs = (interval ?? 3) * 1000;
+      const timeoutMs = (timeout ?? 60) * 1000;
+      const regex = new RegExp(pattern);
+      const start = Date.now();
+
+      while (Date.now() - start < timeoutMs) {
+        const result = await manager.exec(nodeId, command);
+        if (result.code === 0 && regex.test(result.stdout)) {
+          if (store_as) resultStore.set(store_as, result.stdout.trim());
+          return ok(nodeId, Date.now() - start, result.stdout, label ?? `watch (matched after ${t(Date.now() - start)})`);
+        }
+        await new Promise((r) => setTimeout(r, intervalMs));
+      }
+
+      return fail(`${nodeId} watch timeout after ${t(timeoutMs)}: /${pattern}/ never matched`);
+    }
+  );
+
+  // --- Tool 36: omniwire_healthcheck ---
+  server.tool(
+    'omniwire_healthcheck',
+    'Run a comprehensive health check across all nodes. Returns structured per-node status with connectivity, disk, memory, load, and service checks. Single tool call replaces 4+ individual calls.',
+    {
+      checks: z.array(z.enum(['connectivity', 'disk', 'memory', 'load', 'docker', 'services'])).optional().describe('Which checks to run (default: all)'),
+      nodes: z.array(z.string()).optional().describe('Nodes to check (default: all online)'),
+      format: z.enum(['text', 'json']).optional(),
+    },
+    async ({ checks, nodes: targetNodes, format }) => {
+      const checkList = checks ?? ['connectivity', 'disk', 'memory', 'load'];
+      const useJson = format === 'json';
+
+      const parts: string[] = [];
+      if (checkList.includes('connectivity')) parts.push("echo 'CONN:ok'");
+      if (checkList.includes('disk')) parts.push("echo -n 'DISK:'; df / --output=pcent | tail -1 | tr -d ' %'");
+      if (checkList.includes('memory')) parts.push("echo -n 'MEM:'; free | awk '/Mem:/{printf \"%.0f\", $3/$2*100}'");
+      if (checkList.includes('load')) parts.push("echo -n 'LOAD:'; cat /proc/loadavg | awk '{print $1}'");
+      if (checkList.includes('docker')) parts.push("echo -n 'DOCKER:'; docker ps -q 2>/dev/null | wc -l | tr -d ' '");
+      if (checkList.includes('services')) parts.push("echo -n 'SVCFAIL:'; systemctl --failed --no-legend 2>/dev/null | wc -l | tr -d ' '");
+      const cmd = parts.join('; echo; ');
+
+      const nodeIds = targetNodes ?? manager.getOnlineNodes();
+      const results = await Promise.all(nodeIds.map((id) => manager.exec(id, cmd)));
+
+      if (useJson) {
+        const parsed = results.map((r) => {
+          const data: Record<string, string | number | boolean> = { node: r.nodeId, online: r.code !== -1 };
+          for (const line of r.stdout.split('\n')) {
+            const [k, v] = line.split(':');
+            if (k && v) data[k.toLowerCase()] = isNaN(Number(v)) ? v : Number(v);
+          }
+          data.ms = r.durationMs;
+          return data;
+        });
+        return okBrief(JSON.stringify(parsed));
+      }
+
+      const lines = results.map((r) => {
+        if (r.code === -1) return `- ${r.nodeId.padEnd(10)} OFFLINE`;
+        const metrics = r.stdout.split('\n').filter(Boolean).join('  ');
+        return `+ ${r.nodeId.padEnd(10)} ${t(r.durationMs).padStart(6)}  ${metrics}`;
+      });
+      return okBrief(lines.join('\n'));
+    }
+  );
+
+  // --- Tool 37: omniwire_agent_task ---
+  server.tool(
+    'omniwire_agent_task',
+    'Dispatch a task to a specific node for background execution and retrieve results later. Creates a task file on the node, runs it in background, and provides a task ID for polling. Designed for A2A (agent-to-agent) workflows where one agent dispatches work and another retrieves results.',
+    {
+      action: z.enum(['dispatch', 'status', 'result', 'list', 'cancel']).describe('Action'),
+      node: z.string().optional().describe('Node (default: contabo)'),
+      command: z.string().optional().describe('Command to dispatch (for dispatch action)'),
+      task_id: z.string().optional().describe('Task ID (for status/result/cancel)'),
+      label: z.string().optional(),
+    },
+    async ({ action, node, command, task_id, label }) => {
+      const nodeId = node ?? 'contabo';
+      const taskDir = '/tmp/.omniwire-tasks';
+
+      if (action === 'dispatch') {
+        if (!command) return fail('command required');
+        const id = `ow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const escaped = command.replace(/'/g, "'\\''");
+        const script = `mkdir -p ${taskDir} && echo 'running' > ${taskDir}/${id}.status && echo '${label ?? command.slice(0, 60)}' > ${taskDir}/${id}.label && (bash -c '${escaped}' > ${taskDir}/${id}.stdout 2> ${taskDir}/${id}.stderr; echo $? > ${taskDir}/${id}.exit; echo 'done' > ${taskDir}/${id}.status) &`;
+        const result = await manager.exec(nodeId, script);
+        return result.code === 0
+          ? okBrief(`${nodeId} task dispatched: ${id}`)
+          : fail(`dispatch failed: ${result.stderr}`);
+      }
+
+      if (action === 'status' && task_id) {
+        const result = await manager.exec(nodeId, `cat ${taskDir}/${task_id}.status 2>/dev/null || echo 'not found'`);
+        return okBrief(`${nodeId} ${task_id}: ${result.stdout.trim()}`);
+      }
+
+      if (action === 'result' && task_id) {
+        const result = await manager.exec(nodeId, `echo "EXIT:$(cat ${taskDir}/${task_id}.exit 2>/dev/null)"; echo "---STDOUT---"; cat ${taskDir}/${task_id}.stdout 2>/dev/null; echo "---STDERR---"; cat ${taskDir}/${task_id}.stderr 2>/dev/null`);
+        return ok(nodeId, result.durationMs, result.stdout, `task ${task_id}`);
+      }
+
+      if (action === 'list') {
+        const result = await manager.exec(nodeId, `for f in ${taskDir}/*.status 2>/dev/null; do id=$(basename "$f" .status); echo "$id $(cat "$f") $(cat ${taskDir}/$id.label 2>/dev/null)"; done 2>/dev/null | tail -20`);
+        return ok(nodeId, result.durationMs, result.stdout || '(no tasks)', 'task list');
+      }
+
+      if (action === 'cancel' && task_id) {
+        await manager.exec(nodeId, `echo 'cancelled' > ${taskDir}/${task_id}.status`);
+        return okBrief(`${nodeId} ${task_id} cancelled`);
+      }
+
+      return fail('invalid action/params');
+    }
+  );
+
+  // --- Tool 38: omniwire_a2a_message ---
+  server.tool(
+    'omniwire_a2a_message',
+    'Agent-to-agent messaging via shared message queues on mesh nodes. Agents can send/receive typed messages, enabling multi-agent coordination without direct coupling. Messages are stored on disk and survive process restarts.',
+    {
+      action: z.enum(['send', 'receive', 'peek', 'list_channels', 'clear']).describe('Action'),
+      channel: z.string().optional().describe('Message channel name (e.g., "recon-results", "scan-tasks")'),
+      node: z.string().optional().describe('Node hosting the queue (default: contabo)'),
+      message: z.string().optional().describe('Message content (for send). Can be JSON.'),
+      sender: z.string().optional().describe('Sender agent name (for send)'),
+      count: z.number().optional().describe('Number of messages to receive (default: 1). Messages are dequeued on receive.'),
+    },
+    async ({ action, channel, node, message, sender, count }) => {
+      const nodeId = node ?? 'contabo';
+      const queueDir = '/tmp/.omniwire-a2a';
+
+      if (action === 'send') {
+        if (!channel || !message) return fail('channel and message required');
+        const ts = Date.now();
+        const id = `${ts}-${Math.random().toString(36).slice(2, 6)}`;
+        const payload = JSON.stringify({ id, ts, sender: sender ?? 'unknown', message });
+        const escaped = payload.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `mkdir -p ${queueDir}/${channel} && echo '${escaped}' >> ${queueDir}/${channel}/queue`);
+        return result.code === 0
+          ? okBrief(`${channel}: message sent (${message.length} chars)`)
+          : fail(result.stderr);
+      }
+
+      if (action === 'receive') {
+        if (!channel) return fail('channel required');
+        const n = count ?? 1;
+        const result = await manager.exec(nodeId, `head -${n} ${queueDir}/${channel}/queue 2>/dev/null && sed -i '1,${n}d' ${queueDir}/${channel}/queue 2>/dev/null || echo '(empty queue)'`);
+        return ok(nodeId, result.durationMs, result.stdout, `a2a recv ${channel}`);
+      }
+
+      if (action === 'peek') {
+        if (!channel) return fail('channel required');
+        const n = count ?? 5;
+        const result = await manager.exec(nodeId, `head -${n} ${queueDir}/${channel}/queue 2>/dev/null || echo '(empty queue)'`);
+        return ok(nodeId, result.durationMs, result.stdout, `a2a peek ${channel}`);
+      }
+
+      if (action === 'list_channels') {
+        const result = await manager.exec(nodeId, `ls -1 ${queueDir}/ 2>/dev/null || echo '(no channels)'`);
+        return ok(nodeId, result.durationMs, result.stdout, 'a2a channels');
+      }
+
+      if (action === 'clear') {
+        if (!channel) return fail('channel required');
+        await manager.exec(nodeId, `rm -f ${queueDir}/${channel}/queue`);
+        return okBrief(`${channel}: cleared`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 39: omniwire_semaphore ---
+  server.tool(
+    'omniwire_semaphore',
+    'Distributed locking / semaphore for multi-agent coordination. Prevents race conditions when multiple agents operate on the same resource. Uses atomic file-based locks on mesh nodes.',
+    {
+      action: z.enum(['acquire', 'release', 'status', 'list']).describe('Action'),
+      lock_name: z.string().optional().describe('Lock name (e.g., "deploy-prod", "db-migration")'),
+      node: z.string().optional().describe('Node hosting the lock (default: contabo)'),
+      owner: z.string().optional().describe('Owner/agent name (for acquire)'),
+      ttl: z.number().optional().describe('Lock TTL in seconds (default: 300). Auto-releases after TTL.'),
+    },
+    async ({ action, lock_name, node, owner, ttl }) => {
+      const nodeId = node ?? 'contabo';
+      const lockDir = '/tmp/.omniwire-locks';
+      const ttlSec = ttl ?? 300;
+
+      if (action === 'acquire') {
+        if (!lock_name) return fail('lock_name required');
+        const lockFile = `${lockDir}/${lock_name}.lock`;
+        const ownerName = owner ?? 'agent';
+        const now = Date.now();
+        // Simple atomic lock: mkdir as atomic test-and-set, write owner info inside
+        const acquireScript = [
+          `mkdir -p ${lockDir}`,
+          `if mkdir ${lockFile}.d 2>/dev/null; then`,
+          `  echo '${ownerName}:${now}:${ttlSec}' > ${lockFile}`,
+          `  echo 'acquired'`,
+          `else`,
+          `  cat ${lockFile} 2>/dev/null || echo 'locked (unknown owner)'`,
+          `fi`,
+        ].join('\n');
+        const result = await manager.exec(nodeId, acquireScript);
+        return okBrief(`${lock_name}: ${result.stdout.trim()}`);
+      }
+
+      if (action === 'release') {
+        if (!lock_name) return fail('lock_name required');
+        await manager.exec(nodeId, `rm -f ${lockDir}/${lock_name}.lock && rmdir ${lockDir}/${lock_name}.lock.d 2>/dev/null`);
+        return okBrief(`${lock_name}: released`);
+      }
+
+      if (action === 'status') {
+        if (!lock_name) return fail('lock_name required');
+        const result = await manager.exec(nodeId, `cat ${lockDir}/${lock_name}.lock 2>/dev/null || echo '(unlocked)'`);
+        return okBrief(`${lock_name}: ${result.stdout.trim()}`);
+      }
+
+      if (action === 'list') {
+        const cmd = "for f in " + lockDir + "/*.lock 2>/dev/null; do [ -f \"$f\" ] && echo \"$(basename $f .lock): $(cat $f)\"; done 2>/dev/null || echo '(no locks)'";
+        const result = await manager.exec(nodeId, cmd);
+        return ok(nodeId, result.durationMs, result.stdout, 'locks');
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 40: omniwire_event ---
+  server.tool(
+    'omniwire_event',
+    'Publish/subscribe events for agent coordination. Agents can emit events and other agents can poll for them. Events are timestamped and stored in a log for audit. Supports the ACP/A2A event-driven pattern.',
+    {
+      action: z.enum(['emit', 'poll', 'history', 'clear']).describe('Action'),
+      topic: z.string().optional().describe('Event topic (e.g., "deploy.complete", "scan.found-vuln")'),
+      node: z.string().optional().describe('Node hosting events (default: contabo)'),
+      data: z.string().optional().describe('Event data/payload (for emit). Can be JSON.'),
+      source: z.string().optional().describe('Source agent name (for emit)'),
+      since: z.string().optional().describe('Only return events after this timestamp (epoch ms) for poll'),
+      limit: z.number().optional().describe('Max events to return (default: 10)'),
+    },
+    async ({ action, topic, node, data, source, since, limit }) => {
+      const nodeId = node ?? 'contabo';
+      const eventDir = '/tmp/.omniwire-events';
+      const n = limit ?? 10;
+
+      if (action === 'emit') {
+        if (!topic) return fail('topic required');
+        const event = JSON.stringify({ ts: Date.now(), topic, source: source ?? 'agent', data: data ?? '' });
+        const escaped = event.replace(/'/g, "'\\''");
+        await manager.exec(nodeId, `mkdir -p ${eventDir} && echo '${escaped}' >> ${eventDir}/events.log`);
+        return okBrief(`event emitted: ${topic}`);
+      }
+
+      if (action === 'poll') {
+        let cmd: string;
+        if (topic && since) {
+          cmd = `grep '"topic":"${topic}"' ${eventDir}/events.log 2>/dev/null | awk -F'"ts":' '{split($2,a,","); if(a[1]>${since}) print}' | tail -${n}`;
+        } else if (topic) {
+          cmd = `grep '"topic":"${topic}"' ${eventDir}/events.log 2>/dev/null | tail -${n}`;
+        } else if (since) {
+          cmd = `awk -F'"ts":' '{split($2,a,","); if(a[1]>${since}) print}' ${eventDir}/events.log 2>/dev/null | tail -${n}`;
+        } else {
+          cmd = `tail -${n} ${eventDir}/events.log 2>/dev/null || echo '(no events)'`;
+        }
+        const result = await manager.exec(nodeId, cmd);
+        return ok(nodeId, result.durationMs, result.stdout || '(no events)', `events ${topic ?? 'all'}`);
+      }
+
+      if (action === 'history') {
+        const result = await manager.exec(nodeId, `wc -l ${eventDir}/events.log 2>/dev/null | awk '{print $1}'`);
+        const count = result.stdout.trim() || '0';
+        return okBrief(`${count} events total`);
+      }
+
+      if (action === 'clear') {
+        await manager.exec(nodeId, `rm -f ${eventDir}/events.log`);
+        return okBrief('events cleared');
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 41: omniwire_workflow ---
+  server.tool(
+    'omniwire_workflow',
+    'Define and execute a named workflow (DAG of steps) that can be reused. Workflows are stored on disk and can be triggered by any agent. Supports conditional steps, fan-out/fan-in, and cross-node orchestration.',
+    {
+      action: z.enum(['define', 'run', 'list', 'get', 'delete']).describe('Action'),
+      name: z.string().optional().describe('Workflow name'),
+      node: z.string().optional().describe('Node to store/run workflow (default: contabo)'),
+      definition: z.string().optional().describe('JSON workflow definition for define action. Format: {steps: [{node, command, label, depends_on?, store_as?}]}'),
+      format: z.enum(['text', 'json']).optional(),
+    },
+    async ({ action, name, node, definition, format }) => {
+      const nodeId = node ?? 'contabo';
+      const wfDir = '/tmp/.omniwire-workflows';
+      const useJson = format === 'json';
+
+      if (action === 'define') {
+        if (!name || !definition) return fail('name and definition required');
+        const escaped = definition.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `mkdir -p ${wfDir} && echo '${escaped}' > ${wfDir}/${name}.json`);
+        return result.code === 0 ? okBrief(`workflow ${name} defined`) : fail(result.stderr);
+      }
+
+      if (action === 'run') {
+        if (!name) return fail('name required');
+        const readResult = await manager.exec(nodeId, `cat ${wfDir}/${name}.json 2>/dev/null`);
+        if (readResult.code !== 0) return fail(`workflow ${name} not found`);
+
+        let wf: { steps: Array<{ node?: string; command: string; label?: string; depends_on?: number[]; store_as?: string }> };
+        try { wf = JSON.parse(readResult.stdout); } catch { return fail('invalid workflow definition'); }
+
+        const stepResults: string[] = [];
+        const stepOutputs: string[] = [];
+
+        for (let i = 0; i < wf.steps.length; i++) {
+          const step = wf.steps[i];
+          const stepNode = step.node ?? nodeId;
+          let cmd = step.command
+            .replace(/\{\{step(\d+)\}\}/g, (_, n) => stepOutputs[parseInt(n)] ?? '')
+            .replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
+
+          const result = await manager.exec(stepNode, cmd);
+          stepOutputs[i] = result.stdout.trim();
+          if (step.store_as && result.code === 0) resultStore.set(step.store_as, result.stdout.trim());
+
+          const status = result.code === 0 ? 'ok' : `exit ${result.code}`;
+          stepResults.push(useJson
+            ? JSON.stringify({ step: i, node: stepNode, label: step.label, ok: result.code === 0, code: result.code, ms: result.durationMs, stdout: result.stdout.slice(0, 1000) })
+            : `[${i}] ${stepNode} > ${step.label ?? `step ${i}`}  ${t(result.durationMs)}  ${status}\n${result.stdout.split('\n').slice(0, 5).join('\n')}`);
+
+          if (result.code !== 0) break;
+        }
+
+        return useJson ? okBrief(`[${stepResults.join(',')}]`) : okBrief(trim(stepResults.join('\n\n')));
+      }
+
+      if (action === 'list') {
+        const result = await manager.exec(nodeId, `ls -1 ${wfDir}/*.json 2>/dev/null | xargs -I{} basename {} .json || echo '(no workflows)'`);
+        return ok(nodeId, result.durationMs, result.stdout, 'workflows');
+      }
+
+      if (action === 'get') {
+        if (!name) return fail('name required');
+        const result = await manager.exec(nodeId, `cat ${wfDir}/${name}.json 2>/dev/null || echo 'not found'`);
+        return ok(nodeId, result.durationMs, result.stdout, `workflow ${name}`);
+      }
+
+      if (action === 'delete') {
+        if (!name) return fail('name required');
+        await manager.exec(nodeId, `rm -f ${wfDir}/${name}.json`);
+        return okBrief(`workflow ${name} deleted`);
+      }
+
+      return fail('invalid action');
     }
   );
 

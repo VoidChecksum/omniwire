@@ -8,60 +8,97 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0A0E14" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP-40_tools-59C2FF?style=for-the-badge&labelColor=0A0E14" alt="tools" />
-  <img src="https://img.shields.io/badge/transport-stdio_%7C_SSE_%7C_REST-91B362?style=for-the-badge&labelColor=0A0E14" alt="transports" />
+  <img src="https://img.shields.io/badge/MCP-49_tools-59C2FF?style=for-the-badge&labelColor=0A0E14" alt="tools" />
+  <img src="https://img.shields.io/badge/A2A-ready-91B362?style=for-the-badge&labelColor=0A0E14" alt="A2A" />
+  <img src="https://img.shields.io/badge/transport-stdio_%7C_SSE_%7C_REST-E6B450?style=for-the-badge&labelColor=0A0E14" alt="transports" />
   <img src="https://img.shields.io/badge/node-%E2%89%A520-CC93E6?style=for-the-badge&logo=node.js&labelColor=0A0E14" alt="node" />
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-E6B450?style=for-the-badge&labelColor=0A0E14" alt="license" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8B949E?style=for-the-badge&labelColor=0A0E14" alt="license" /></a>
 </p>
 
 <p align="center">
-  <sub>One MCP server to control all your machines. Multi-path SSH2 failover, adaptive file transfers, encrypted cross-node config sync.</sub>
+  <b>One MCP server to control all your machines.</b><br/>
+  <sub>49 tools. Multi-agent orchestration. A2A messaging. Distributed locking. Cross-node pipelines.</sub><br/>
+  <sub>SSH2 failover, adaptive file transfers, encrypted config sync, agentic chaining.</sub>
 </p>
 
 ---
 
-## How It Works
+## Quick Start
+
+```bash
+npm install -g omniwire
+```
+
+Add to your AI agent (Claude Code, Cursor, OpenCode, etc.):
+
+```json
+{
+  "mcpServers": {
+    "omniwire": { "command": "omniwire", "args": ["--stdio"] }
+  }
+}
+```
+
+---
+
+## Why OmniWire?
+
+| Problem | OmniWire Solution |
+|---------|-------------------|
+| Managing multiple servers manually | One tool call controls any node |
+| Agents can't coordinate with each other | A2A messaging, events, semaphores |
+| Multi-step deploys need many round-trips | Pipelines chain steps in 1 call |
+| Flaky commands break agent loops | Built-in retry + assert + watch |
+| Long tasks block the agent | Background dispatch with task IDs |
+| Results lost between tool calls | Session store with `{{key}}` interpolation |
+| Different transfer methods for diff sizes | Auto-selects SFTP / netcat / aria2c |
+| SSH connections drop | Multi-path failover + circuit breaker |
+
+---
+
+## Architecture
 
 ```mermaid
 graph TB
     subgraph clients["AI Agents"]
         CC["Claude Code"]
-        OC["OpenCode"]
+        OC["OpenCode / OpenClaw"]
         CU["Cursor / Any MCP Client"]
+        A2["Other Agents (A2A)"]
     end
 
     subgraph omniwire["OmniWire MCP Server"]
         direction TB
-        MCP["MCP Protocol Layer\nstdio | SSE | REST"]
+        MCP["MCP Protocol Layer<br/>stdio | SSE | REST"]
 
-        subgraph tools["40 Tools"]
+        subgraph tools["49 Tools"]
             direction LR
-            EXEC["Execution\nexec  run  batch\nbroadcast"]
-            FILES["Files\nread  write\ntransfer  deploy"]
-            MON["Monitoring\nstatus  metrics\nlogs"]
-            SYS["System\ndocker  services\nkernel"]
-            SYNC["CyberSync\nsync  diff\nsearch  secrets"]
+            EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline"]
+            AGENT["Agentic<br/>store  watch  task<br/>a2a  events  locks"]
+            FILES["Files & Deploy<br/>read  write  transfer<br/>deploy  find"]
+            SYS["System & DevOps<br/>docker  services<br/>cron  env  git  syslog"]
+            SYNC["CyberSync<br/>sync  diff  search<br/>secrets  knowledge"]
         end
 
         subgraph engine["Core Engine"]
             direction LR
-            POOL["SSH2 Pool\npersistent  compressed\ncircuit breaker"]
-            XFER["Transfer Engine\nSFTP  netcat+gzip\naria2c 16-conn"]
-            CSYNC["Sync Engine\nPostgreSQL  XChaCha20\nparallel reconcile"]
+            POOL["SSH2 Pool<br/>persistent  compressed<br/>circuit breaker"]
+            XFER["Transfer Engine<br/>SFTP  netcat+gzip<br/>aria2c 16-conn"]
+            CSYNC["Sync Engine<br/>PostgreSQL  XChaCha20<br/>parallel reconcile"]
         end
     end
 
     subgraph mesh["Infrastructure Mesh"]
         direction LR
-        N1["Node A\nstorage\n10.0.0.1"]
-        N2["Node B\ncompute\n10.0.0.2"]
-        N3["Node C\nGPU\n10.0.0.3"]
-        N4["Node D\nlocal"]
+        N1["Node A<br/>storage"]
+        N2["Node B<br/>compute"]
+        N3["Node C<br/>GPU"]
+        N4["Node D<br/>local"]
     end
 
-    DB[("PostgreSQL\nCyberSync DB")]
+    DB[("PostgreSQL<br/>CyberBase")]
 
-    CC & OC & CU -->|MCP| MCP
+    CC & OC & CU & A2 -->|MCP| MCP
     MCP --> tools
     tools --> engine
     POOL -->|"SSH2 multi-path"| N1 & N2 & N3
@@ -79,28 +116,32 @@ graph TB
 
 ---
 
-## Features at a Glance
+## Key Capabilities
 
 <table>
 <tr>
 <td width="50%">
 
-### Remote Execution
+### Execution
 ```
-omniwire_exec       single command, any node
+omniwire_exec       single command + retry + assert
 omniwire_run        multi-line script (compact UI)
-omniwire_batch      N commands in 1 tool call
+omniwire_batch      N commands, 1 tool call, chaining
 omniwire_broadcast  parallel across all nodes
+omniwire_pipeline   multi-step DAG with data flow
 ```
 
 </td>
 <td width="50%">
 
-### Adaptive File Transfer
+### Multi-Agent (A2A)
 ```
- < 10 MB   SFTP         native, 80ms
- 10M-1GB   netcat+gzip  compressed, 200ms
- > 1 GB    aria2c       16-parallel, max speed
+omniwire_store        session key-value store
+omniwire_a2a_message  agent-to-agent queues
+omniwire_event        pub/sub event bus
+omniwire_semaphore    distributed locking
+omniwire_agent_task   async background dispatch
+omniwire_workflow     reusable named DAGs
 ```
 
 </td>
@@ -108,20 +149,41 @@ omniwire_broadcast  parallel across all nodes
 <tr>
 <td>
 
+### Adaptive File Transfer
+```
+ < 10 MB   SFTP         native, 80ms
+ 10M-1GB   netcat+gzip  compressed, 100ms
+ > 1 GB    aria2c       16-parallel, max speed
+```
+
+</td>
+<td>
+
 ### Connection Resilience
 ```
 Connected --> Health Ping (30s, parallel)
-    |              |
-    |         > 3s? --> Degraded warning
     |
 Failure --> Multi-path Failover
-    |         WireGuard --> Tailscale --> Public IP
+    |         WireGuard -> Tailscale -> Public IP
     |
-    +--> Retry (exp. backoff)
-    |         500ms -> 1s -> 2s -> ... -> 15s
+    +--> Retry (500ms -> 1s -> ... -> 15s)
     |
-3 fails --> Circuit OPEN (20s)
-                 --> Auto-recover
+3 fails --> Circuit OPEN (20s) -> Auto-recover
+```
+
+</td>
+</tr>
+<tr>
+<td>
+
+### Agentic Chaining
+```
+exec(store_as="ip")       store result
+exec(command="ping {{ip}}") interpolate
+batch(abort_on_fail=true)   fail-fast
+exec(format="json")         structured output
+exec(retry=3, assert="ok")  resilient
+watch(assert="ready")       poll until
 ```
 
 </td>
@@ -129,17 +191,14 @@ Failure --> Multi-path Failover
 
 ### CyberSync + CyberBase
 ```
-Node A --push--> PostgreSQL (cyberbase)
-    |                 |
-    |            XChaCha20-Poly1305
-    |            encrypted at rest
-    |
-    +--mirror--> Obsidian Vault
-                     |
-                Obsidian Sync (cloud)
-
-6 AI tools synced automatically:
-Claude  OpenCode  Codex  Gemini  ...
+Nodes --push--> PostgreSQL (cyberbase)
+  |                  |
+  |             XChaCha20-Poly1305
+  |             encrypted at rest
+  |
+  +--mirror--> Obsidian Vault
+                    |
+               Obsidian Sync (cloud)
 ```
 
 </td>
@@ -148,55 +207,51 @@ Claude  OpenCode  Codex  Gemini  ...
 
 ---
 
-## All 40 Tools
+## All 49 Tools
 
-<details>
-<summary><b>Execution (4 tools)</b></summary>
+### Execution (5)
 
 | Tool | Description |
 |------|-------------|
-| `omniwire_exec` | Run a command on any node. Supports `label` for compact display. |
+| `omniwire_exec` | Run command on any node. `retry`, `assert`, `store_as`, `format:"json"`, `{{key}}` interpolation. |
 | `omniwire_run` | Execute multi-line scripts via temp file. Keeps tool call UI clean. |
-| `omniwire_batch` | Run N commands across nodes in a single tool call. Parallel by default. |
-| `omniwire_broadcast` | Execute on all online nodes simultaneously. |
+| `omniwire_batch` | N commands in 1 call. Chaining with `{{prev}}`, `abort_on_fail`, parallel or sequential. |
+| `omniwire_broadcast` | Execute on all nodes simultaneously. JSON format support. |
+| `omniwire_pipeline` | Multi-step DAG. `{{prev}}`/`{{stepN}}` interpolation, per-step error handling, cross-node. |
 
-</details>
-
-<details>
-<summary><b>Monitoring (3 tools)</b></summary>
+### Agentic / A2A (9)
 
 | Tool | Description |
 |------|-------------|
-| `omniwire_mesh_status` | Health, latency, CPU/mem/disk for all nodes |
-| `omniwire_node_info` | Detailed info for a specific node |
-| `omniwire_live_monitor` | Snapshot metrics: cpu, memory, disk, network |
+| `omniwire_store` | Session key-value store. Persist results across tool calls for chaining. |
+| `omniwire_watch` | Poll command until assert pattern matches. For deploys, builds, service readiness. |
+| `omniwire_healthcheck` | Parallel health probe across all nodes (connectivity, disk, mem, load, docker). Single call. |
+| `omniwire_agent_task` | Dispatch background tasks. Get task IDs, poll status, retrieve results. A2A async. |
+| `omniwire_a2a_message` | Agent-to-agent message queues. Send/receive/peek on named channels. |
+| `omniwire_semaphore` | Distributed locking. Atomic acquire/release to prevent race conditions. |
+| `omniwire_event` | Pub/sub events. Emit/poll timestamped events per topic. ACP/A2A/ACPX compatible. |
+| `omniwire_workflow` | Define and run reusable named workflows (DAGs). Stored on disk, triggered by any agent. |
 
-</details>
-
-<details>
-<summary><b>Files (4 tools)</b></summary>
-
-| Tool | Description |
-|------|-------------|
-| `omniwire_read_file` | Read file from any node. Supports `node:/path` format. |
-| `omniwire_write_file` | Write/create file on any node |
-| `omniwire_list_files` | List directory contents |
-| `omniwire_find_files` | Search by glob pattern across all nodes |
-
-</details>
-
-<details>
-<summary><b>Transfer & Deploy (2 tools)</b></summary>
+### Files & Transfer (6)
 
 | Tool | Description |
 |------|-------------|
+| `omniwire_read_file` | Read file from any node. `node:/path` format. |
+| `omniwire_write_file` | Write/create file on any node. |
+| `omniwire_list_files` | List directory contents. |
+| `omniwire_find_files` | Glob search across all nodes. |
 | `omniwire_transfer_file` | Copy between nodes. Auto-selects SFTP/netcat/aria2c. |
-| `omniwire_deploy` | Deploy file from one node to all others in parallel |
+| `omniwire_deploy` | Deploy file from one node to all others in parallel. |
 
-</details>
+### Monitoring (3)
 
-<details>
-<summary><b>System (6 tools)</b></summary>
+| Tool | Description |
+|------|-------------|
+| `omniwire_mesh_status` | Health, latency, CPU/mem/disk for all nodes. Tabular output. |
+| `omniwire_node_info` | Detailed info for a specific node. |
+| `omniwire_live_monitor` | Snapshot metrics: cpu, memory, disk, network. |
+
+### System & DevOps (12)
 
 | Tool | Description |
 |------|-------------|
@@ -205,48 +260,25 @@ Claude  OpenCode  Codex  Gemini  ...
 | `omniwire_tail_log` | Last N lines of a log file |
 | `omniwire_install_package` | Install via apt/npm/pip |
 | `omniwire_service_control` | systemd start/stop/restart/status |
-| `omniwire_docker` | Run docker commands on any node |
+| `omniwire_docker` | Docker commands on any node |
+| `omniwire_kernel` | dmesg, sysctl, modprobe, lsmod, strace, perf |
+| `omniwire_cron` | List/add/remove cron jobs |
+| `omniwire_env` | Get/set persistent environment variables |
+| `omniwire_network` | ping, traceroute, dns, ports, speed, connections |
+| `omniwire_git` | Git commands on repos on any node |
+| `omniwire_syslog` | Query journalctl with filters |
 
-</details>
-
-<details>
-<summary><b>Network (2 tools)</b></summary>
+### Network & Misc (5)
 
 | Tool | Description |
 |------|-------------|
 | `omniwire_port_forward` | Create/list/close SSH tunnels |
 | `omniwire_open_browser` | Open URL in browser on a node |
-
-</details>
-
-<details>
-<summary><b>Advanced (4 tools)</b></summary>
-
-| Tool | Description |
-|------|-------------|
-| `omniwire_kernel` | dmesg, sysctl, modprobe, lsmod, strace, perf |
 | `omniwire_shell` | Persistent PTY session (preserves cwd/env) |
 | `omniwire_stream` | Capture streaming output (tail -f, watch) |
-| `omniwire_update` | Self-update OmniWire |
+| `omniwire_clipboard` | Shared clipboard buffer across mesh |
 
-</details>
-
-<details>
-<summary><b>DevOps (6 tools) — NEW in v2.3.0</b></summary>
-
-| Tool | Description |
-|------|-------------|
-| `omniwire_cron` | List/add/remove cron jobs on any node |
-| `omniwire_env` | Get/set/list environment variables (persistent via /etc/environment) |
-| `omniwire_network` | Network diagnostics: ping, traceroute, dns, ports, speed, connections |
-| `omniwire_clipboard` | Shared clipboard buffer across all mesh nodes |
-| `omniwire_git` | Run git commands on repos on any node |
-| `omniwire_syslog` | Query journalctl with unit/priority/time filters |
-
-</details>
-
-<details>
-<summary><b>CyberSync (9 tools)</b></summary>
+### CyberSync (9)
 
 | Tool | Description |
 |------|-------------|
@@ -259,62 +291,7 @@ Claude  OpenCode  Codex  Gemini  ...
 | `cybersync_manifest` | Show tracked files per tool |
 | `cybersync_force_push` | Force push file to all nodes |
 | `omniwire_secrets` | Get/set/delete/list/sync secrets (1Password, file, env) |
-
-</details>
-
----
-
-## Quick Start
-
-### Install
-
-```bash
-npm install -g omniwire
-```
-
-### Configure Mesh
-
-Create `~/.omniwire/mesh.json`:
-
-```json
-{
-  "nodes": [
-    {
-      "id": "server1",
-      "host": "10.0.0.1",
-      "user": "root",
-      "identityFile": "id_ed25519",
-      "role": "storage"
-    },
-    {
-      "id": "server2",
-      "host": "10.0.0.2",
-      "user": "root",
-      "identityFile": "id_ed25519",
-      "role": "compute"
-    }
-  ]
-}
-```
-
-### Add to Claude Code
-
-```json
-{
-  "mcpServers": {
-    "omniwire": {
-      "command": "omniwire",
-      "args": ["--stdio"]
-    }
-  }
-}
-```
-
-### Interactive Mode
-
-```bash
-omniwire    # or: ow
-```
+| `omniwire_update` | Self-update OmniWire |
 
 ---
 
@@ -322,128 +299,95 @@ omniwire    # or: ow
 
 | Operation | Latency | Details |
 |-----------|---------|---------|
-| **Command exec** | `~120ms` | SSH2 + command + return |
-| **Mesh status** | `~150ms` | Parallel probes, 5s cache |
-| **File read (<1MB)** | `~80ms` | SFTP, binary-safe |
-| **Transfer (10MB)** | `~200ms` | gzip netcat over WireGuard |
-| **Config push** | `~200ms` | Parallel to all nodes + Obsidian mirror |
-| **Reconcile (500 files)** | `~1.2s` | 100-file hash batches, parallel walkDir |
+| Command exec | ~120ms | SSH2 channel on persistent connection |
+| Mesh status (all nodes) | ~150ms | Parallel probes, 5s cache |
+| File read (<1MB) | ~80ms | SFTP, binary-safe |
+| Transfer (10MB) | ~200ms | gzip netcat over WireGuard |
+| Pipeline (5 steps) | ~600ms | Sequential with interpolation |
+| Health check (4 nodes) | ~200ms | Parallel, structured output |
+| A2A message send | ~130ms | File-based queue |
+| Config push (all nodes) | ~200ms | Parallel + Obsidian mirror |
 
 ---
 
 ## Security
 
-All remote execution uses `ssh2.Client.exec()`, never `child_process.exec()`. Key-based auth only, no passwords stored. Multi-path failover (WireGuard → Tailscale → Public IP) with SSH key caching. CyberBase: single PostgreSQL DB for all projects. XChaCha20-Poly1305 at-rest encryption for synced configs. 2MB output guard prevents memory exhaustion. Circuit breaker with 20s auto-recovery isolates failing nodes. Output auto-truncated at 4KB to prevent context bloat in AI agents.
+- All remote execution via `ssh2.Client.exec()` -- never `child_process.exec()`
+- Key-based auth only, no passwords stored, SSH key caching
+- Multi-path failover: WireGuard -> Tailscale -> Public IP
+- XChaCha20-Poly1305 at-rest encryption for synced configs
+- 2MB output guard prevents memory exhaustion
+- 4KB auto-truncation prevents context window bloat
+- Circuit breaker with 20s auto-recovery isolates failing nodes
+- CORS restricted to localhost on REST API
 
 ---
 
 ## Transport Modes
 
-| Mode | Default Port | Use Case |
-|------|-------------|----------|
-| `--stdio` | -- | Claude Code, Cursor, MCP subprocess clients |
-| `--sse-port=N` | 3200 | OpenCode, remote HTTP-based MCP clients |
-| `--rest-port=N` | 3201 | Scripts, dashboards, non-MCP integrations |
+| Mode | Port | Use Case |
+|------|------|----------|
+| `--stdio` | -- | Claude Code, Cursor, MCP subprocess |
+| `--sse-port=N` | 3200 | OpenCode, remote HTTP MCP clients |
+| `--rest-port=N` | 3201 | Scripts, dashboards, non-MCP |
 
 ```bash
-omniwire --stdio                          # MCP mode
+omniwire --stdio                          # MCP mode (default)
 omniwire --sse-port=3200 --rest-port=3201 # HTTP mode
 omniwire --stdio --no-sync               # MCP without CyberSync
+omniwire    # or: ow                      # Interactive REPL
+```
+
+---
+
+## Configure Mesh
+
+Create `~/.omniwire/mesh.json`:
+
+```json
+{
+  "nodes": [
+    { "id": "server1", "host": "10.0.0.1", "user": "root", "identityFile": "id_ed25519", "role": "storage" },
+    { "id": "server2", "host": "10.0.0.2", "user": "root", "identityFile": "id_ed25519", "role": "compute" }
+  ]
+}
 ```
 
 ---
 
 ## Changelog
 
-### v2.3.0 — Compact Output, Speed, New Tools
+<details>
+<summary><b>v2.4.0 -- Agentic Loop, A2A, Multi-Agent Orchestration</b></summary>
 
-**Output Overhaul**
-- Complete rewrite of MCP output formatting — compact, scannable, AI-agent optimized
-- Auto-truncation at 4KB prevents context window bloat
-- Smart time formatting: `342ms` for fast, `2.1s` for slow ops
-- Multi-node results use `--` separator with per-node status markers
-- One-liner responses for write/install/deploy/tunnel operations
-- Mesh status now tabular with `+`/`-` online indicators
-- Human-readable file sizes in transfer results (`1.2MB` not bytes)
-- Error prefix standardized to `ERR` for quick scanning
-- `label` parameter now used as primary display in all exec-type tools
+**9 new agentic tools** (40 -> 49): store, pipeline, watch, healthcheck, agent_task, a2a_message, semaphore, event, workflow
 
-**Performance**
-- Health pings now parallel (`Promise.allSettled`) instead of serial loop
-- Keepalive interval: 3s (was 5s) — faster dead connection detection
-- Keepalive max retries: 2 (was 3) — 6s detection vs 15s
-- Status cache TTL: 5s (was 8s) — fresher data
-- Circuit breaker recovery: 20s (was 30s) — faster node recovery
-- Connection timeout: 6s (was 8s) — faster failover
-- Transfer netcat sleep: 100ms (was 200ms)
-- Transfer aria2c sleep: 250ms (was 500ms)
+**Agentic upgrades to existing tools**: `format:"json"`, `retry`, `assert`, `store_as`, `{{key}}` interpolation on exec/broadcast/batch
 
-**6 New Tools (34 → 40)**
-- `omniwire_cron` — manage cron jobs (list/add/remove) on any node
-- `omniwire_env` — get/set/list persistent environment variables
-- `omniwire_network` — diagnostics: ping, traceroute, dns, ports, speed, connections
-- `omniwire_clipboard` — shared clipboard buffer across all mesh nodes
-- `omniwire_git` — run git commands on repos on any node
-- `omniwire_syslog` — query journalctl with unit/priority/time filters
+**Dynamic response processing**: Structured JSON output, step-to-step data flow, session result store, abort-on-fail chains
 
----
+</details>
 
-### v2.2.1 — Security & Bug Fixes
+<details>
+<summary><b>v2.3.0 -- Compact Output, Speed, New Tools</b></summary>
 
-**omniwire_exec**
-- `command` is now optional when `script` is provided — previously rejected valid script-only calls
-- Scripts now respect the `timeout` parameter — previously scripts could run indefinitely
-- Removed unused `escaped` variable (dead code cleanup)
-- Output now uses the compact `ok()` helper with label support
+Output overhaul (auto-truncation, smart time, tabular multi-node). Performance (parallel health pings, 3s keepalive, 20s circuit breaker, 6s connect timeout). 6 new DevOps tools (cron, env, network, clipboard, git, syslog).
 
-**omniwire_shell**
-- Fixed race condition: close listener is now registered before writing commands, preventing spurious 15s timeouts on fast-completing commands
+</details>
 
-**transfer**
-- Added size guard on base64 fallback — files >1MB no longer silently fail with `ARG_MAX` overflow
+<details>
+<summary><b>v2.2.1 -- Security & Bug Fixes</b></summary>
 
-**REST API**
-- CORS restricted from `*` to `http://localhost` — prevents cross-origin command execution from browser tabs
-- Added input validation on `/api/exec` and `/api/transfer` endpoints
+Fixed script-only exec, shell race condition, transfer size guard, CORS restriction, input validation.
 
-**Reconnect backoff**
-- Fixed misleading comment: actual cap is 15s (comment previously said 30s)
+</details>
 
----
+<details>
+<summary><b>v2.1.0 -- Multi-Path Failover & Performance</b></summary>
 
-### v2.1.0 — Multi-Path Failover & Performance
+Multi-path SSH (WireGuard/Tailscale/Public), SSH key caching, CyberBase integration, VaultBridge Obsidian mirror.
 
-**Connectivity**
-- Multi-path host resolution: WireGuard → Tailscale → Public IP per node
-- Auto-reconnect tries all paths before marking node offline
-- `exec()` attempts immediate reconnect on offline nodes before failing
-
-**Performance**
-- SSH key caching (no repeated disk reads)
-- Compression disabled for small commands (faster round-trips)
-- Reconnect backoff: 500ms start, 15s cap (was 1s/30s)
-- Health ping interval: 45s (was 30s) with lighter `true` command
-- Status cache: 8s TTL (was 5s)
-- Circuit breaker recovery: 30s (was 60s)
-
-**CyberSync**
-- Parallel `walkDir` with 8 concurrent subdirectory scans
-- Hash batch size doubled (50 → 100)
-- Reconcile interval: 2min (was 5min)
-- Timing in reconcile logs
-
-**Output**
-- Compact `ok()` / `fail()` helpers for cleaner Claude Code results
-- `mesh_status` outputs aligned table with column headers
-- `node_info` shows which host path is active (WG/Tailscale/Public)
-- `exec` and `run` use `label` field as display tag
-
-**CyberBase Integration**
-- Renamed PostgreSQL database from `cybersync` to `cyberbase` (single DB for everything)
-- VaultBridge: mirrors all sync items, knowledge, and memory to Obsidian-compatible markdown
-- Obsidian vault at `~/Documents/BuisnessProjects/CyberBase` with Obsidian Sync for cloud backup
-- Daily event logs in `vault/logs/`
-- `obsidian-mcp` deployed on all mesh nodes for AI vault access
+</details>
 
 ---
 
@@ -452,23 +396,20 @@ omniwire --stdio --no-sync               # MCP without CyberSync
 ```
 omniwire/
   src/
-    mcp/           MCP server (40 tools, 3 transports)
+    mcp/           MCP server (49 tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
-    sync/          CyberSync + CyberBase (PostgreSQL, Obsidian vault, encryption)
+    sync/          CyberSync + CyberBase (PostgreSQL, Obsidian, encryption)
     protocol/      Mesh config, types, path parsing
     commands/      Interactive REPL
     ui/            Terminal formatting
 ```
-
----
 
 ## Requirements
 
 - **Node.js** >= 20
 - **SSH access** to remote nodes (key-based auth)
 - **PostgreSQL** (only for CyberSync)
-- **WireGuard + Tailscale** recommended (multi-path failover uses both)
-- **Obsidian** (optional) for CyberBase vault browsing + Obsidian Sync cloud backup
+- **WireGuard + Tailscale** recommended (multi-path failover)
 
 ---
 
