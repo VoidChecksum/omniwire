@@ -7,6 +7,8 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import type { NodeManager } from '../nodes/manager.js';
 import type { TransferEngine } from '../nodes/transfer.js';
 import { ShellManager, kernelExec } from '../nodes/shell.js';
@@ -248,8 +250,11 @@ function sqlEscape(val: string): string {
   return val.replace(/'/g, "''").replace(/\\/g, '\\\\').replace(/\0/g, '');
 }
 
-/** Fire-and-forget write to CyberBase. Never blocks, never throws. */
+/** Fire-and-forget write to CyberBase + Obsidian vault + Canvas. Never blocks, never throws. */
 function cb(category: string, key: string, value: string) {
+  // Sync to Obsidian vault + Canvas mindmap (local, synchronous, best-effort)
+  syncVault(category, key, value);
+  // Sync to CyberBase PostgreSQL (remote, async, queued)
   if (!cbManager || cbCircuitOpen()) return;
   const valEsc = sqlEscape(value).slice(0, 50000);
   const keyEsc = sqlEscape(`${category}:${key}`);
@@ -278,6 +283,201 @@ async function drainCb() {
   }
   if (CB_QUEUE.length > 0 && !cbCircuitOpen()) setTimeout(drainCb, 100);
   else cbDraining = false;
+}
+
+// -- Obsidian + Canvas auto-sync ------------------------------------------------
+// Mirrors CyberBase writes to local Obsidian vault + Canvas mindmap.
+// Vault path is resolved at startup; if it doesn't exist, sync is silently skipped.
+
+const VAULT_ROOT = join(
+  process.env.USERPROFILE ?? process.env.HOME ?? '',
+  'Documents', 'BuisnessProjects', 'CyberBase'
+);
+const CANVAS_PATH = join(VAULT_ROOT, 'CyberBase MindMap.canvas');
+const vaultExists = existsSync(VAULT_ROOT);
+
+/** Map CyberBase category → Obsidian vault subfolder */
+function vaultFolder(category: string): string {
+  const cat = category.toLowerCase();
+  if (cat.startsWith('project')) return 'projects';
+  if (cat.startsWith('infra') || cat.startsWith('tool') || cat.startsWith('mesh')) return 'infrastructure';
+  if (cat.startsWith('vuln') || cat.startsWith('security') || cat.startsWith('cve')) return 'knowledge/security-kb';
+  if (cat.startsWith('cred')) return 'credentials';
+  if (cat.startsWith('system') || cat.startsWith('rule')) return 'system';
+  if (cat.startsWith('log')) return 'logs';
+  if (cat.startsWith('sync')) return 'sync';
+  if (cat.startsWith('note') || cat.startsWith('memo')) return 'memory';
+  return 'knowledge';
+}
+
+/** Sanitize a key into a valid filename */
+function sanitizeFilename(key: string): string {
+  return key.replace(/[<>:"/\\|?*]/g, '-').replace(/^\.+/, '').slice(0, 120);
+}
+
+/** Auto-sync a knowledge entry to Obsidian vault as a .md file */
+function syncObsidian(category: string, key: string, value: string): void {
+  if (!vaultExists) return;
+  try {
+    const folder = join(VAULT_ROOT, vaultFolder(category));
+    if (!existsSync(folder)) mkdirSync(folder, { recursive: true });
+    const filename = sanitizeFilename(key) + '.md';
+    const filepath = join(folder, filename);
+    const frontmatter = `---\nsource: omniwire\ncategory: ${category}\nkey: ${key}\nupdated: ${new Date().toISOString()}\n---\n\n`;
+    // If value looks like markdown, write as-is; otherwise wrap in code block
+    const body = value.includes('\n') && (value.includes('#') || value.includes('|') || value.includes('- '))
+      ? value
+      : `\`\`\`\n${value}\n\`\`\``;
+    writeFileSync(filepath, frontmatter + body, 'utf-8');
+  } catch { /* vault sync is best-effort */ }
+}
+
+/** Canvas node bounding box */
+interface CanvasBox { x: number; y: number; w: number; h: number }
+
+/** Find a non-overlapping position for a new canvas node using grid placement */
+function findFreeCanvasPosition(
+  existingNodes: CanvasBox[],
+  width: number,
+  height: number,
+): { x: number; y: number } {
+  const GRID_X = 500;   // horizontal spacing
+  const GRID_Y = 400;   // vertical spacing
+  const PADDING = 80;    // minimum gap between nodes
+  const MAX_COLS = 6;
+
+  // Check if a position collides with any existing node
+  const collides = (x: number, y: number): boolean => {
+    for (const n of existingNodes) {
+      const overlap =
+        x < n.x + n.w + PADDING &&
+        x + width + PADDING > n.x &&
+        y < n.y + n.h + PADDING &&
+        y + height + PADDING > n.y;
+      if (overlap) return true;
+    }
+    return false;
+  };
+
+  // Find center of existing nodes to place new ones nearby
+  let cx = 0;
+  let cy = 0;
+  if (existingNodes.length > 0) {
+    for (const n of existingNodes) { cx += n.x; cy += n.y; }
+    cx = Math.round(cx / existingNodes.length);
+    cy = Math.round(cy / existingNodes.length);
+  }
+
+  // Spiral outward from center to find free spot
+  for (let ring = 0; ring < 20; ring++) {
+    for (let col = -ring; col <= ring; col++) {
+      for (let row = -ring; row <= ring; row++) {
+        if (Math.abs(col) !== ring && Math.abs(row) !== ring) continue; // only edges of ring
+        const x = cx + col * GRID_X;
+        const y = cy + row * GRID_Y;
+        if (!collides(x, y)) return { x, y };
+      }
+    }
+  }
+
+  // Fallback: far right of canvas
+  const maxX = existingNodes.reduce((m, n) => Math.max(m, n.x + n.w), 0);
+  return { x: maxX + GRID_X, y: 0 };
+}
+
+/** Map a CyberBase category to a canvas node color (Obsidian canvas colors 1-6) */
+function canvasColor(category: string): string {
+  const cat = category.toLowerCase();
+  if (cat.startsWith('project')) return '2';  // green
+  if (cat.startsWith('infra') || cat.startsWith('tool') || cat.startsWith('mesh')) return '4';  // purple
+  if (cat.startsWith('vuln') || cat.startsWith('security')) return '5';  // cyan
+  if (cat.startsWith('rule') || cat.startsWith('system')) return '1';  // red
+  if (cat.startsWith('cred')) return '3';  // yellow
+  return '6';  // default
+}
+
+/** Auto-sync a knowledge entry to the Canvas mindmap — adds or updates a node */
+function syncCanvas(category: string, key: string, value: string): void {
+  if (!vaultExists || !existsSync(CANVAS_PATH)) return;
+  try {
+    const raw = readFileSync(CANVAS_PATH, 'utf-8');
+    const canvas = JSON.parse(raw) as {
+      nodes: Array<{ id: string; type: string; text: string; x: number; y: number; width: number; height: number; color: string }>;
+      edges: Array<{ id: string; fromNode: string; fromSide: string; toNode: string; toSide: string; label?: string }>;
+    };
+
+    const nodeId = `auto_${sanitizeFilename(category)}_${sanitizeFilename(key)}`.slice(0, 60);
+    const title = `## ${category}: ${key}`;
+    const textContent = `${title}\n${value.slice(0, 500)}`;
+    const nodeWidth = 280;
+    const nodeHeight = Math.min(180, 80 + Math.ceil(value.length / 50) * 18);
+    const color = canvasColor(category);
+
+    // Find existing node by id
+    const existingIdx = canvas.nodes.findIndex(n => n.id === nodeId);
+
+    if (existingIdx >= 0) {
+      // Update in place — keep position
+      canvas.nodes[existingIdx] = {
+        ...canvas.nodes[existingIdx],
+        text: textContent,
+        height: nodeHeight,
+        color,
+      };
+    } else {
+      // Find free position
+      const boxes: CanvasBox[] = canvas.nodes.map(n => ({
+        x: n.x, y: n.y, w: n.width, h: n.height,
+      }));
+      const pos = findFreeCanvasPosition(boxes, nodeWidth, nodeHeight);
+
+      canvas.nodes.push({
+        id: nodeId,
+        type: 'text',
+        text: textContent,
+        x: pos.x,
+        y: pos.y,
+        width: nodeWidth,
+        height: nodeHeight,
+        color,
+      });
+
+      // Auto-connect to relevant parent node
+      const parentId = findCanvasParent(category, canvas.nodes);
+      if (parentId) {
+        canvas.edges.push({
+          id: `e_auto_${nodeId}`,
+          fromNode: parentId,
+          fromSide: 'bottom',
+          toNode: nodeId,
+          toSide: 'top',
+          label: category,
+        });
+      }
+    }
+
+    writeFileSync(CANVAS_PATH, JSON.stringify(canvas, null, '\t'), 'utf-8');
+  } catch { /* canvas sync is best-effort */ }
+}
+
+/** Find the best parent node in the canvas to connect a new entry to */
+function findCanvasParent(category: string, nodes: Array<{ id: string; text: string }>): string | null {
+  const cat = category.toLowerCase();
+  // Map categories to known canvas node IDs
+  if (cat.startsWith('project')) return nodes.find(n => n.id === 'core')?.id ?? null;
+  if (cat.startsWith('infra') || cat.startsWith('mesh') || cat.startsWith('tool')) return nodes.find(n => n.id === 'omniwire' || n.id === 'infra')?.id ?? null;
+  if (cat.startsWith('vuln') || cat.startsWith('security') || cat.startsWith('cve')) return nodes.find(n => n.id === 'securitykb')?.id ?? null;
+  if (cat.startsWith('cred')) return nodes.find(n => n.id === '1password' || n.id === 'db')?.id ?? null;
+  if (cat.startsWith('rule') || cat.startsWith('system')) return nodes.find(n => n.id === 'rules')?.id ?? null;
+  if (cat.startsWith('note') || cat.startsWith('memo')) return nodes.find(n => n.id === 'vault')?.id ?? null;
+  return nodes.find(n => n.id === 'core')?.id ?? null;
+}
+
+/** Sync entry to both Obsidian + Canvas (fire-and-forget, called from cb()) */
+function syncVault(category: string, key: string, value: string): void {
+  syncObsidian(category, key, value);
+  // Only add significant entries to canvas (skip tiny store values)
+  if (value.length > 50) syncCanvas(category, key, value);
 }
 
 /** Get CyberBase health status */
@@ -4053,9 +4253,9 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
   // --- Tool 53: omniwire_knowledge ---
   server.tool(
     'omniwire_knowledge',
-    'CyberBase knowledge base — CRUD, search, and health management for the unified PostgreSQL knowledge store. Supports text search, semantic/vector search, categories, and bulk operations.',
+    'CyberBase knowledge base — CRUD, search, and health management for the unified PostgreSQL knowledge store. Auto-syncs all writes to Obsidian vault + Canvas mindmap. Supports text search, semantic/vector search, categories, bulk operations, and explicit sync-obsidian/sync-canvas actions.',
     {
-      action: z.enum(['get', 'set', 'delete', 'search', 'semantic-search', 'list', 'stats', 'health', 'categories', 'bulk-set', 'export', 'vacuum']).describe('Action'),
+      action: z.enum(['get', 'set', 'delete', 'search', 'semantic-search', 'list', 'stats', 'health', 'categories', 'bulk-set', 'export', 'vacuum', 'sync-obsidian', 'sync-canvas']).describe('Action'),
       category: z.string().optional().describe('Knowledge category (e.g., tools, vulns, infra, notes)'),
       key: z.string().optional().describe('Knowledge key (for get/set/delete)'),
       value: z.string().optional().describe('Value to store (for set)'),
@@ -4152,6 +4352,23 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         if (!cbManager) return fail('no CyberBase connection');
         const r = await cbManager.exec('contabo', pgExec("DELETE FROM knowledge WHERE value IS NULL OR value::text = 'null' OR key = ''; VACUUM ANALYZE knowledge;"));
         return okBrief(`vacuum complete:\n${r.stdout.trim()}`);
+      }
+
+      if (action === 'sync-obsidian') {
+        if (!key || !value) return fail('key and value required');
+        if (!vaultExists) return fail(`Obsidian vault not found at ${VAULT_ROOT}`);
+        const cat = category ?? 'general';
+        syncObsidian(cat, key, value);
+        const folder = vaultFolder(cat);
+        return okBrief(`synced to Obsidian: ${folder}/${sanitizeFilename(key)}.md (${value.length} chars)`);
+      }
+
+      if (action === 'sync-canvas') {
+        if (!key || !value) return fail('key and value required');
+        if (!vaultExists || !existsSync(CANVAS_PATH)) return fail(`Canvas not found at ${CANVAS_PATH}`);
+        const cat = category ?? 'general';
+        syncCanvas(cat, key, value);
+        return okBrief(`synced to Canvas: node auto_${sanitizeFilename(cat)}_${sanitizeFilename(key)} added/updated`);
       }
 
       return fail('invalid action');
