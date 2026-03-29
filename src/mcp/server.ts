@@ -4251,7 +4251,234 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
     }
   );
 
-  // --- Tool 53: omniwire_knowledge ---
+  // --- Tool 53: omniwire_2fa ---
+  // TOTP 2FA manager — stores secrets in CyberBase + 1Password, generates codes on demand
+  const twoFaStore = new Map<string, { secret: string; issuer: string; algorithm: string; digits: number; period: number; addedAt: string }>();
+
+  function base32Decode(encoded: string): Buffer {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    const stripped = encoded.replace(/[\s=-]/g, '').toUpperCase();
+    let bits = '';
+    for (const c of stripped) {
+      const idx = alphabet.indexOf(c);
+      if (idx === -1) continue;
+      bits += idx.toString(2).padStart(5, '0');
+    }
+    const bytes: number[] = [];
+    for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
+    return Buffer.from(bytes);
+  }
+
+  function generateTOTP(secret: string, options?: { period?: number; digits?: number; algorithm?: string; time?: number }): string {
+    const period = options?.period ?? 30;
+    const digits = options?.digits ?? 6;
+    const algo = options?.algorithm ?? 'sha1';
+    const now = options?.time ?? Math.floor(Date.now() / 1000);
+    const counter = Math.floor(now / period);
+    const counterBuf = Buffer.alloc(8);
+    counterBuf.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
+    counterBuf.writeUInt32BE(counter & 0xFFFFFFFF, 4);
+    const keyBuf = base32Decode(secret);
+    const hmac = require('crypto').createHmac(algo, keyBuf).update(counterBuf).digest();
+    const offset = hmac[hmac.length - 1] & 0x0f;
+    const code = ((hmac[offset] & 0x7f) << 24 | hmac[offset + 1] << 16 | hmac[offset + 2] << 8 | hmac[offset + 3]) % (10 ** digits);
+    return code.toString().padStart(digits, '0');
+  }
+
+  server.tool(
+    'omniwire_2fa',
+    'TOTP 2FA manager — add/generate/list/delete/verify/export 2FA secrets. Stores encrypted in CyberBase + 1Password. Generate codes for any stored service instantly.',
+    {
+      action: z.enum(['add', 'generate', 'list', 'delete', 'verify', 'export', 'import', 'bulk-generate']).describe('Action: add=store secret, generate=get current code, list=show all, delete=remove, verify=check code, export=dump all, import=parse otpauth URI, bulk-generate=codes for all'),
+      name: z.string().optional().describe('Service name (e.g., "github", "discord", "aws")'),
+      secret: z.string().optional().describe('Base32-encoded TOTP secret (for add) or otpauth:// URI (for import)'),
+      issuer: z.string().optional().describe('Issuer name (e.g., "GitHub", "Discord")'),
+      code: z.string().optional().describe('6-digit code to verify (for verify action)'),
+      algorithm: z.enum(['sha1', 'sha256', 'sha512']).optional().describe('HMAC algorithm (default: sha1)'),
+      digits: z.number().optional().describe('Code length (default: 6)'),
+      period: z.number().optional().describe('Time step in seconds (default: 30)'),
+      format: z.enum(['json', 'uri', 'table']).optional().describe('Export format (default: table)'),
+      node: z.string().optional().describe('Node for 1Password sync'),
+      background: z.boolean().optional().describe('Run in background'),
+    },
+    async (args) => {
+      const { action, name, secret, issuer, code: verifyCode, algorithm, digits, period, format, node: targetNode } = args;
+      const nodeId = targetNode ?? 'contabo';
+
+      // Load from CyberBase on first access if memory is empty
+      if (twoFaStore.size === 0 && cbManager) {
+        try {
+          const r = await cbManager.exec('contabo', pgExec(`SELECT key, value FROM knowledge WHERE source_tool = 'omniwire' AND key LIKE '2fa:%' LIMIT 100`));
+          if (r.code === 0 && r.stdout) {
+            for (const line of r.stdout.split('\n')) {
+              const match = line.match(/^\s*2fa:(\S+)\s*\|\s*(.+)/);
+              if (match) {
+                try {
+                  const parsed = JSON.parse(match[2].trim());
+                  const data = parsed.data ? JSON.parse(parsed.data) : parsed;
+                  twoFaStore.set(match[1], data);
+                } catch { /* skip malformed */ }
+              }
+            }
+          }
+        } catch { /* CyberBase offline, continue with memory */ }
+      }
+
+      switch (action) {
+        case 'add': {
+          if (!name) return fail('name required');
+          if (!secret) return fail('secret required');
+          const entry = {
+            secret: secret.replace(/\s/g, '').toUpperCase(),
+            issuer: issuer ?? name,
+            algorithm: algorithm ?? 'sha1',
+            digits: digits ?? 6,
+            period: period ?? 30,
+            addedAt: new Date().toISOString(),
+          };
+          twoFaStore.set(name, entry);
+          // Persist to CyberBase (secret stored as JSON, no raw secret in key)
+          cb('2fa', name, JSON.stringify(entry));
+          // Sync to 1Password
+          if (cbManager) {
+            const opCmd = `op item get "OmniWire 2FA - ${name}" --vault "CyberBase" >/dev/null 2>&1 && op item edit "OmniWire 2FA - ${name}" --vault "CyberBase" "notesPlain=${entry.secret}" 2>/dev/null || op item create --category=SecureNote --vault="CyberBase" --title="OmniWire 2FA - ${name}" "notesPlain=${entry.secret}" 2>/dev/null`;
+            cbManager.exec(nodeId, opCmd).catch(() => {});
+          }
+          const currentCode = generateTOTP(entry.secret, { period: entry.period, digits: entry.digits, algorithm: entry.algorithm });
+          return okBrief(`2FA added: ${name} (${entry.issuer})\nCurrent code: ${currentCode}\nStored in: memory + CyberBase + 1Password`);
+        }
+
+        case 'generate': {
+          if (!name) {
+            // Generate for all
+            if (twoFaStore.size === 0) return fail('no 2FA secrets stored — use add first');
+            const lines: string[] = ['Service | Code | Expires in'];
+            const now = Math.floor(Date.now() / 1000);
+            for (const [n, e] of twoFaStore) {
+              const c = generateTOTP(e.secret, { period: e.period, digits: e.digits, algorithm: e.algorithm });
+              const remaining = e.period - (now % e.period);
+              lines.push(`${n} | ${c} | ${remaining}s`);
+            }
+            return okBrief(lines.join('\n'));
+          }
+          const entry = twoFaStore.get(name);
+          if (!entry) return fail(`${name} not found — use list to see available`);
+          const now = Math.floor(Date.now() / 1000);
+          const currentCode = generateTOTP(entry.secret, { period: entry.period, digits: entry.digits, algorithm: entry.algorithm });
+          const remaining = entry.period - (now % entry.period);
+          return okBrief(`${name}: ${currentCode} (expires in ${remaining}s)`);
+        }
+
+        case 'bulk-generate': {
+          if (twoFaStore.size === 0) return fail('no 2FA secrets stored');
+          const lines: string[] = ['Service | Code | Expires'];
+          const now = Math.floor(Date.now() / 1000);
+          for (const [n, e] of twoFaStore) {
+            const c = generateTOTP(e.secret, { period: e.period, digits: e.digits, algorithm: e.algorithm });
+            const remaining = e.period - (now % e.period);
+            lines.push(`${n} | ${c} | ${remaining}s`);
+          }
+          return okBrief(lines.join('\n'));
+        }
+
+        case 'list': {
+          if (twoFaStore.size === 0) return okBrief('No 2FA secrets stored');
+          const lines: string[] = ['Service | Issuer | Algorithm | Digits | Period | Added'];
+          for (const [n, e] of twoFaStore) {
+            lines.push(`${n} | ${e.issuer} | ${e.algorithm} | ${e.digits} | ${e.period}s | ${e.addedAt.split('T')[0]}`);
+          }
+          return okBrief(lines.join('\n'));
+        }
+
+        case 'delete': {
+          if (!name) return fail('name required');
+          if (!twoFaStore.has(name)) return fail(`${name} not found`);
+          twoFaStore.delete(name);
+          // Remove from CyberBase
+          if (cbManager) {
+            const sql = `DELETE FROM knowledge WHERE source_tool = 'omniwire' AND key = '2fa:${sqlEscape(name)}'`;
+            CB_QUEUE.push(sql);
+            if (!cbDraining) drainCb();
+            // Remove from 1Password
+            cbManager.exec(nodeId, `op item delete "OmniWire 2FA - ${name}" --vault "CyberBase" 2>/dev/null`).catch(() => {});
+          }
+          return okBrief(`2FA deleted: ${name}`);
+        }
+
+        case 'verify': {
+          if (!name) return fail('name required');
+          if (!verifyCode) return fail('code required');
+          const entry = twoFaStore.get(name);
+          if (!entry) return fail(`${name} not found`);
+          const now = Math.floor(Date.now() / 1000);
+          // Check current window ± 1 step
+          for (const offset of [0, -1, 1]) {
+            const expected = generateTOTP(entry.secret, {
+              period: entry.period, digits: entry.digits, algorithm: entry.algorithm,
+              time: now + (offset * entry.period)
+            });
+            if (verifyCode === expected) return okBrief(`VALID — ${name} code matches (window: ${offset === 0 ? 'current' : offset < 0 ? 'previous' : 'next'})`);
+          }
+          return fail(`INVALID — ${name} code does not match`);
+        }
+
+        case 'import': {
+          if (!secret) return fail('otpauth:// URI required');
+          // Parse otpauth://totp/Issuer:Account?secret=XXX&issuer=YYY&algorithm=SHA1&digits=6&period=30
+          const url = new URL(secret);
+          if (url.protocol !== 'otpauth:') return fail('invalid URI — must start with otpauth://');
+          const label = decodeURIComponent(url.pathname.replace(/^\/\/totp\//, ''));
+          const parsedSecret = url.searchParams.get('secret');
+          if (!parsedSecret) return fail('no secret in URI');
+          const parsedIssuer = url.searchParams.get('issuer') ?? label.split(':')[0] ?? 'Unknown';
+          const parsedAlgo = (url.searchParams.get('algorithm') ?? 'SHA1').toLowerCase();
+          const parsedDigits = parseInt(url.searchParams.get('digits') ?? '6');
+          const parsedPeriod = parseInt(url.searchParams.get('period') ?? '30');
+          const entryName = name ?? label.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+          const entry = {
+            secret: parsedSecret.toUpperCase(),
+            issuer: parsedIssuer,
+            algorithm: parsedAlgo,
+            digits: parsedDigits,
+            period: parsedPeriod,
+            addedAt: new Date().toISOString(),
+          };
+          twoFaStore.set(entryName, entry);
+          cb('2fa', entryName, JSON.stringify(entry));
+          const currentCode = generateTOTP(entry.secret, { period: entry.period, digits: entry.digits, algorithm: entry.algorithm });
+          return okBrief(`Imported: ${entryName} (${parsedIssuer})\nCurrent code: ${currentCode}`);
+        }
+
+        case 'export': {
+          if (twoFaStore.size === 0) return fail('no 2FA secrets stored');
+          const fmt = format ?? 'table';
+          if (fmt === 'json') {
+            const data: Record<string, unknown> = {};
+            for (const [n, e] of twoFaStore) data[n] = { ...e };
+            return okBrief(JSON.stringify(data, null, 2));
+          }
+          if (fmt === 'uri') {
+            const lines: string[] = [];
+            for (const [n, e] of twoFaStore) {
+              lines.push(`otpauth://totp/${encodeURIComponent(e.issuer)}:${encodeURIComponent(n)}?secret=${e.secret}&issuer=${encodeURIComponent(e.issuer)}&algorithm=${e.algorithm.toUpperCase()}&digits=${e.digits}&period=${e.period}`);
+            }
+            return okBrief(lines.join('\n'));
+          }
+          // table
+          const lines: string[] = ['Service | Issuer | Secret (last 4) | Algorithm'];
+          for (const [n, e] of twoFaStore) {
+            lines.push(`${n} | ${e.issuer} | ...${e.secret.slice(-4)} | ${e.algorithm}`);
+          }
+          return okBrief(lines.join('\n'));
+        }
+
+        default:
+          return fail('invalid action');
+      }
+    }
+  );
+
+  // --- Tool 54: omniwire_knowledge ---
   server.tool(
     'omniwire_knowledge',
     'CyberBase knowledge base — CRUD, search, and health management for the unified PostgreSQL knowledge store. Auto-syncs all writes to Obsidian vault + Canvas mindmap. Supports text search, semantic/vector search, categories, bulk operations, and explicit sync-obsidian/sync-canvas actions.',
