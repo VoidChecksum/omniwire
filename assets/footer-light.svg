@@ -1,0 +1,32 @@
+<svg width="900" height="120" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF"/>
+      <stop offset="40%" style="stop-color:#F0F4F8"/>
+      <stop offset="70%" style="stop-color:#D8E2EE"/>
+      <stop offset="100%" style="stop-color:#B8CCE0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Top wave -->
+  <path d="M0,0 L0,20 Q150,45 300,20 Q450,-5 600,20 Q750,45 900,20 L900,0 Z" fill="#59C2FF" opacity="0.12"/>
+  <path d="M0,0 L0,15 Q200,40 400,15 Q600,-10 900,15 L900,0 Z" fill="#59C2FF" opacity="0.08"/>
+
+  <!-- Background -->
+  <rect y="20" width="900" height="100" fill="url(#bg)"/>
+
+  <!-- Tagline -->
+  <text x="450" y="62" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="13" font-weight="400" fill="#586069" text-anchor="middle">Built for the machines that build for us.</text>
+
+  <!-- Bottom accent dots -->
+  <g fill="#1A3A5C" opacity="0.15">
+    <circle cx="380" cy="85" r="1.5"/>
+    <circle cx="420" cy="85" r="1.5"/>
+    <circle cx="450" cy="85" r="2"/>
+    <circle cx="480" cy="85" r="1.5"/>
+    <circle cx="520" cy="85" r="1.5"/>
+  </g>
+
+  <!-- Subtle bottom line -->
+  <line x1="350" y1="95" x2="550" y2="95" stroke="#1A3A5C" stroke-width="0.5" opacity="0.1"/>
+</svg>

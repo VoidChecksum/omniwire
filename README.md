@@ -441,14 +441,16 @@ omniwire/
 
 <br/>
 
-<div align="center">
-  <sub>Built for the machines that build for us.</sub>
-</div>
+<p align="center">
+  <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/dm/omniwire?style=flat-square&color=59C2FF&labelColor=0D1117&label=downloads" alt="downloads" /></a>
+  <a href="https://github.com/VoidChecksum/omniwire/stargazers"><img src="https://img.shields.io/github/stars/VoidChecksum/omniwire?style=flat-square&color=E6B450&labelColor=0D1117" alt="stars" /></a>
+  <a href="https://github.com/VoidChecksum/omniwire/issues"><img src="https://img.shields.io/github/issues/VoidChecksum/omniwire?style=flat-square&color=FF6D00&labelColor=0D1117" alt="issues" /></a>
+</p>
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:59C2FF,50:162B44,100:0D1117&height=120&section=footer" />
-    <source media="(prefers-color-scheme: light)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:59C2FF,50:B8CCE0,100:FFFFFF&height=120&section=footer" />
-    <img alt="footer" src="https://capsule-render.vercel.app/api?type=waving&color=0:59C2FF,50:162B44,100:0D1117&height=120&section=footer" />
+    <source media="(prefers-color-scheme: dark)" srcset="assets/footer-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="assets/footer-light.svg" />
+    <img alt="Built for the machines that build for us." src="assets/footer-dark.svg" width="900" />
   </picture>
 </p>
