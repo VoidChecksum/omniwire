@@ -10,7 +10,7 @@
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0D1117" alt="npm" /></a>
   <img src="https://img.shields.io/badge/MCP_Tools-81-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
   <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&labelColor=0D1117" alt="A2A" />
-  <img src="https://img.shields.io/badge/Latency-~81ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
+  <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
   <img src="https://img.shields.io/badge/CyberBase-Sync-CC93E6?style=for-the-badge&labelColor=0D1117" alt="cyberbase" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/GPL--3.0-license-8B949E?style=for-the-badge&labelColor=0D1117" alt="license" /></a>
 </p>
@@ -295,7 +295,7 @@ omniwire_workflow     reusable named DAGs
 
 ### Adaptive File Transfer
 ```
- < 10 MB   SFTP         native, 81ms
+ < 10 MB   SFTP         native, 80ms
  10M-1GB   netcat+LZ4   compressed, 100ms
  > 1 GB    aria2c       16-parallel, max speed
 ```
@@ -482,7 +482,7 @@ watch(assert="ready")       poll until
 
 | Operation | Latency | Optimization |
 |-----------|---------|-------------|
-| **Command exec** | **~81ms** | AES-128-GCM cipher, persistent SSH2, zero-fork `:` ping |
+| **Command exec** | **~80ms** | AES-128-GCM cipher, persistent SSH2, zero-fork `:` ping |
 | **Mesh status** | **~100ms** | Parallel probes, 5s cache, single `/proc` read |
 | **File read (<1MB)** | **~60ms** | SFTP-first (skips `cat` fork) |
 | **Transfer (10MB)** | **~120ms** | LZ4 compression (10x faster than gzip) |
