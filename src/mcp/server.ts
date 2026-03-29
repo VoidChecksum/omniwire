@@ -1033,9 +1033,16 @@ tags: ${meshNode.tags.join(', ')}`;
         const splitSetup = 'mullvad split-tunnel set state on 2>/dev/null; mullvad lan set allow 2>/dev/null;';
         switch (action) {
           case 'connect': {
-            const relay = vpnServer ? `mullvad relay set location ${vpnServer} && ` : '';
-            const result = await manager.exec(nodeId, `${splitSetup} ${relay}mullvad connect && sleep 2 && mullvad status && echo "--- mesh check ---" && ip route get 10.10.0.1 2>/dev/null | head -1`);
-            return ok(nodeId, result.durationMs, result.stdout, `mullvad connect${vpnServer ? ` ${vpnServer}` : ''}`);
+            let relay = '';
+            if (vpnServer) {
+              relay = `mullvad relay set location ${vpnServer} && `;
+            } else if (config === 'fastest' || config === 'auto' || !config) {
+              // Mullvad auto-selects lowest latency relay by default when no location is set
+              // Just ensure WireGuard protocol for best speed
+              relay = 'mullvad relay set tunnel-protocol wireguard 2>/dev/null; ';
+            }
+            const result = await manager.exec(nodeId, `${splitSetup} ${relay}mullvad connect && sleep 2 && mullvad status && echo "---relay---" && mullvad relay get | head -3 && echo "---ip---" && curl -s --max-time 5 https://am.i.mullvad.net/json 2>/dev/null | grep -E "ip|country|city|mullvad_exit" && echo "---mesh---" && ip route get 10.10.0.1 2>/dev/null | head -1`);
+            return ok(nodeId, result.durationMs, result.stdout, `mullvad connect${vpnServer ? ` ${vpnServer}` : ' (auto-fastest)'}`);
           }
           case 'disconnect': {
             const result = await manager.exec(nodeId, 'mullvad disconnect && mullvad status');
