@@ -683,6 +683,23 @@ omniwire/
 
 ---
 
+## Changelog
+
+| Version | Date | Changes |
+|---------|------|---------|
+| **v3.1.4** | 2026-03-29 | Auto-sync CyberBase writes to Obsidian vault + Canvas mindmap, collision-avoidance grid placement, `sync-obsidian` / `sync-canvas` actions in knowledge tool |
+| **v3.1.3** | 2026-03-29 | OmniMesh WireGuard mesh manager, event bus (Webhook/WS/SSE), knowledge tool (12 actions), auto-update system, CDP rewrite (persistent Docker container, 18 actions), mesh expose/gateway, CyberBase circuit breaker + SQL hardening |
+| **v3.1.2** | 2026-03-28 | Collapsible tool sections in README, npm README sync |
+| **v3.1.1** | 2026-03-28 | Bug fixes, improved error handling in CDP tool |
+| **v3.1.0** | 2026-03-27 | OmniMesh VPN, 81 MCP tools, A2A protocol, event system, background dispatch |
+| **v3.0.0** | 2026-03-25 | Major rewrite: CyberSync, pipeline DAGs, blackboard, task queues, LZ4 transfers, AES-128-GCM encryption |
+| **v2.6.1** | 2026-03-20 | VPN routing (Mullvad/OpenVPN/WG/Tailscale), multi-hop, DAITA, quantum tunnels |
+| **v2.5.0** | 2026-03-15 | Firewall management (nftables), cert management, deploy tool |
+| **v2.0.0** | 2026-03-10 | CDP browser automation, cookie sync, 1Password integration |
+| **v1.0.0** | 2026-03-01 | Initial release — SSH exec, file transfer, node management |
+
+---
+
 <br/>
 
 <p align="center">
