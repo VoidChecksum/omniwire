@@ -8,12 +8,20 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0D1117" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP_Tools-56-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
+  <img src="https://img.shields.io/badge/MCP_Tools-75+-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
   <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&labelColor=0D1117" alt="A2A" />
   <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
-  <img src="https://img.shields.io/badge/Background-Dispatch-CC93E6?style=for-the-badge&labelColor=0D1117" alt="background" />
+  <img src="https://img.shields.io/badge/CyberBase-Sync-CC93E6?style=for-the-badge&labelColor=0D1117" alt="cyberbase" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/GPL--3.0-license-8B949E?style=for-the-badge&labelColor=0D1117" alt="license" /></a>
 </p>
+
+<div align="center">
+
+**The infrastructure layer for AI agent swarms.**
+
+75+ MCP tools · A2A protocol · VPN routing · nftables firewall · CDP browser · cookie sync · CyberBase persistence
+
+</div>
 
 ---
 
@@ -206,7 +214,7 @@ graph TB
         direction TB
         MCP["MCP Protocol Layer<br/>stdio | SSE | REST"]
 
-        subgraph tools["56 Tools"]
+        subgraph tools["75+ Tools"]
             direction LR
             EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline  bg"]
             AGENT["Agentic<br/>store  watch  task<br/>a2a  events  locks"]
@@ -340,7 +348,7 @@ watch(assert="ready")       poll until
 
 ---
 
-## All 56 Tools
+## All 75+ Tools
 
 > **Every tool** supports `background: true` -- returns a task ID immediately. Poll with `omniwire_bg`.
 
@@ -408,17 +416,45 @@ watch(assert="ready")       poll until
 | `omniwire_git` | Git commands on repos on any node |
 | `omniwire_syslog` | Query journalctl with filters |
 
-### Network, VPN & Firewall (7)
+### Network, VPN & Security (9)
 
 | Tool | Description |
 |------|-------------|
 | `omniwire_firewall` | nftables firewall engine. Presets (server/paranoid/pentest), rate-limit, geo-block, port-knock, ban/unban, audit. Mesh always whitelisted. |
-| `omniwire_vpn` | Manage VPN (Mullvad/OpenVPN/WireGuard/Tailscale). Split-tunnel + full-node modes. Mesh stays connected. |
+| `omniwire_vpn` | VPN (Mullvad/OpenVPN/WireGuard/Tailscale). Multi-hop, DAITA, quantum, obfuscation, killswitch. Mesh-safe. |
+| `omniwire_cookies` | Cookie management. JSON/Header/Netscape formats. Browser extract, CyberBase + 1Password sync. |
+| `omniwire_cdp` | Chrome DevTools Protocol. Launch headless Chrome, screenshot, PDF, DOM dump, cookie extract. |
+| `omniwire_proxy` | HTTP/SOCKS proxy management. Start/stop proxies on any node. |
+| `omniwire_dns` | DNS management. Resolve, set server, flush cache, block domains. |
 | `omniwire_port_forward` | Create/list/close SSH tunnels |
-| `omniwire_open_browser` | Open URL in browser on a node |
 | `omniwire_shell` | Persistent PTY session (preserves cwd/env) |
-| `omniwire_stream` | Capture streaming output (tail -f, watch) |
 | `omniwire_clipboard` | Shared clipboard buffer across mesh |
+
+### Infrastructure (9)
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_backup` | Snapshot/restore paths on any node. Diff, cleanup, retention policies. |
+| `omniwire_container` | Full Docker lifecycle. Compose up/down, build, push, logs, prune, stats. |
+| `omniwire_cert` | TLS certificates. Let's Encrypt issue/renew, check expiry, self-signed generation. |
+| `omniwire_user` | User & SSH key management. Add/remove users, deploy keys, sudo config. |
+| `omniwire_schedule` | Distributed cron with failover. Add/remove/list/run-now scheduled tasks. |
+| `omniwire_alert` | Threshold alerting. Disk/mem/load/offline checks with webhook notifications. |
+| `omniwire_log_aggregate` | Cross-node log search. Grep journalctl/syslog across all nodes in parallel. |
+| `omniwire_benchmark` | Node performance testing. CPU/memory/disk/network benchmarks. |
+| `omniwire_stream` | Capture streaming output (tail -f, watch) |
+
+### Agent Toolkit (7)
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_snippet` | Save/run reusable command templates with `{{var}}` substitution. |
+| `omniwire_alias` | In-session command shortcuts. Set/run aliases. |
+| `omniwire_trace` | Distributed tracing. Start/stop/view span waterfalls across nodes. |
+| `omniwire_doctor` | Health diagnostics. Checks SSH, disk, mem, docker, WireGuard, tools, CyberBase. |
+| `omniwire_metrics` | Prometheus-compatible metrics. Scrape/export node stats. |
+| `omniwire_audit` | Command audit log. View/search/stats on all executed commands. |
+| `omniwire_plugin` | Plugin system. List/load plugins from `~/.omniwire/plugins/`. |
 
 ### CyberSync (9)
 
@@ -517,6 +553,23 @@ Create `~/.omniwire/mesh.json`:
 ## Changelog
 
 <details>
+<summary><b>v3.0.0 -- 75+ Tools, CyberBase Persistence, Full Platform</b></summary>
+
+**19 new tools**: proxy, dns, backup, container, cert, user, schedule, alert, log_aggregate, benchmark, snippet, alias, trace, doctor, metrics, audit, plugin, cookies, cdp.
+
+**CyberBase auto-persistence**: Store, audit, blackboard, cookies all sync to PostgreSQL. pgvector semantic search. 5s statement_timeout on all DB calls.
+
+**Architecture**: Priority command queues, smart output truncation, predictive node selection, latency history, connection pool stats.
+
+**Security**: Command denylist (blocks rm -rf /, fork bombs, disk wipes). Audit log with CyberBase persistence.
+
+**A2A**: Typed message schemas (JSON validation), dead letter queue for failed tasks, pub/sub event filters.
+
+**DX**: GitHub Actions CI, bash/zsh/fish shell completions, --json flag, cookie sync to 1Password.
+
+</details>
+
+<details>
 <summary><b>v2.7.0 -- Firewall Engine</b></summary>
 
 **`omniwire_firewall`**: nftables-based firewall engine with 17 actions. Presets (server, paranoid, minimal, pentest), rate-limiting, geo-blocking by country, port-knocking sequences, IP ban/unban, whitelist/blacklist, rule management, audit log, save/restore.
@@ -539,7 +592,7 @@ Create `~/.omniwire/mesh.json`:
 <details>
 <summary><b>v2.5.1 -- Universal Background Dispatch</b></summary>
 
-**`background: true`** auto-injected into all 56 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
+**`background: true`** auto-injected into all 75+ tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
 
 </details>
 
@@ -578,7 +631,7 @@ Security fixes, multi-path SSH failover, CyberBase integration, VaultBridge Obsi
 ```
 omniwire/
   src/
-    mcp/           MCP server (56 tools, 3 transports)
+    mcp/           MCP server (75+ tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
     sync/          CyberSync + CyberBase (PostgreSQL, Obsidian, encryption)
     protocol/      Mesh config, types, path parsing

@@ -54,7 +54,7 @@
 
   <!-- Stats bar -->
   <g font-family="'Segoe UI Mono', 'SF Mono', monospace" font-size="13" fill="#1A3A5C" opacity="0.6">
-    <text x="175" y="175" text-anchor="middle">56 MCP Tools</text>
+    <text x="175" y="175" text-anchor="middle">75+ MCP Tools</text>
     <text x="325" y="175" text-anchor="middle">A2A Protocol</text>
     <text x="450" y="175" text-anchor="middle">~80ms Latency</text>
     <text x="575" y="175" text-anchor="middle">LZ4 Transfer</text>
