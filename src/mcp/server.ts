@@ -2054,86 +2054,232 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
   );
 
   // --- Tool 33: omniwire_cdp ---
+  // Uses the persistent cdp-browser Docker container (puppeteer-core) for all operations.
+  // Falls back to direct Chrome CLI for nodes without the container.
+  const cdpScript = (js: string) =>
+    `docker exec cdp-browser node -e ${JSON.stringify(`const puppeteer=require('puppeteer-core');(async()=>{` +
+      `const r=await fetch('http://127.0.0.1:9222/json/version');const{webSocketDebuggerUrl:ws}=await r.json();` +
+      `const browser=await puppeteer.connect({browserWSEndpoint:ws});` +
+      js +
+      `})().catch(e=>{console.error('ERR:',e.message);process.exit(1)});`)} 2>&1`;
+
   server.tool(
     'omniwire_cdp',
-    'Chrome DevTools Protocol browser control on mesh nodes. Launch headless Chrome, navigate, screenshot, extract DOM/cookies, save PDF. For scraping, testing, recon.',
+    'Chrome DevTools Protocol — persistent headless browser via Docker container. Navigate, screenshot, HTML, PDF, cookies, evaluate JS, click, type, wait, network intercept, set-cookies, clear. Reuses pages across calls for speed.',
     {
-      action: z.enum(['launch', 'navigate', 'screenshot', 'html', 'pdf', 'cookies', 'tabs', 'close', 'list']).describe('launch=start Chrome, navigate=open URL, screenshot=capture, html=dump DOM, pdf=save PDF, cookies=extract, tabs=list tabs, close=kill, list=sessions'),
+      action: z.enum([
+        'navigate', 'screenshot', 'html', 'text', 'pdf', 'cookies', 'set-cookies', 'clear-cookies',
+        'tabs', 'close-tab', 'evaluate', 'click', 'type', 'wait', 'select',
+        'network', 'status', 'viewport',
+      ]).describe(
+        'navigate=open URL, screenshot=capture PNG, html=DOM dump, text=innerText, pdf=save PDF, ' +
+        'cookies=get all, set-cookies=inject cookies, clear-cookies=wipe, tabs=list pages, close-tab=close page, ' +
+        'evaluate=run JS in page, click=click selector, type=type into selector, wait=wait for selector, ' +
+        'select=querySelector extract, network=recent requests, status=container health, viewport=set size'
+      ),
       node: z.string().optional().describe('Node (default: contabo)'),
-      url: z.string().optional().describe('URL for navigate/screenshot/html/pdf'),
-      file: z.string().optional().describe('Output path for screenshot/pdf'),
-      session_id: z.string().optional().describe('Session ID from launch'),
+      url: z.string().optional().describe('URL for navigate'),
+      selector: z.string().optional().describe('CSS selector for click/type/wait/select'),
+      value: z.string().optional().describe('Text for type action, JS for evaluate, cookies JSON for set-cookies'),
+      file: z.string().optional().describe('Output path for screenshot/pdf (default: /tmp/cdp-*)'),
+      tab: z.number().optional().describe('Tab index (0-based, default: 0 = most recent)'),
+      width: z.number().optional().describe('Viewport width for viewport action (default: 1920)'),
+      height: z.number().optional().describe('Viewport height for viewport action (default: 1080)'),
+      wait_ms: z.number().optional().describe('Wait timeout in ms (default: 10000)'),
+      full_page: z.boolean().optional().describe('Full page screenshot (default: true)'),
     },
-    async ({ action, node, url, file: outFile, session_id }) => {
+    async ({ action, node, url, selector, value, file: outFile, tab, width, height, wait_ms, full_page }) => {
       const nodeId = node ?? 'contabo';
-      const sdir = '/tmp/.omniwire-cdp';
+      const tabIdx = tab ?? 0;
+      const timeout = wait_ms ?? 10000;
+      const getPage = `const pages=await browser.pages();const page=pages[${tabIdx}]||pages[0];if(!page){console.log('no pages open');process.exit(0);}`;
 
-      if (action === 'launch') {
-        const id = `cdp-${Date.now().toString(36)}`;
-        const port = 9222 + Math.floor(Math.random() * 100);
-        const cmd = `mkdir -p ${sdir}; command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null || { echo "chrome not installed"; exit 1; }; ` +
-          `CHROME=$(command -v google-chrome || command -v chromium-browser); ` +
-          `$CHROME --headless --disable-gpu --no-sandbox --remote-debugging-port=${port} --user-data-dir=${sdir}/${id} ${url ? `"${url}"` : 'about:blank'} &>/dev/null & ` +
-          `echo $! > ${sdir}/${id}.pid; echo ${port} > ${sdir}/${id}.port; sleep 1; ` +
-          `echo "session=${id} port=${port} pid=$(cat ${sdir}/${id}.pid)"`;
-        const r = await manager.exec(nodeId, cmd);
-        if (r.code === 0) resultStore.set('cdp_session', id);
-        return ok(nodeId, r.durationMs, r.stdout, 'chrome launch');
+      if (action === 'status') {
+        const r = await manager.exec(nodeId,
+          `docker inspect cdp-browser --format '{{.State.Status}} uptime={{.State.StartedAt}}' 2>/dev/null; ` +
+          `curl -sf http://127.0.0.1:9222/json/version 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(f\\"chrome={d.get('Browser','')} proto={d.get('Protocol-Version','')}\\")" 2>/dev/null; ` +
+          `curl -sf http://127.0.0.1:9222/json/list 2>/dev/null | python3 -c "import json,sys;tabs=json.load(sys.stdin);print(f\\"{len(tabs)} tabs open\\");[print(f\\"  {t['id'][:8]} {t.get('url','')[:80]}\\") for t in tabs[:10]]" 2>/dev/null`
+        );
+        return ok(nodeId, r.durationMs, r.stdout, 'cdp status');
       }
 
-      const sid = session_id ?? resultStore.get('cdp_session') ?? '';
-
-      if (action === 'navigate' && url) {
-        const cmd = `PORT=$(cat ${sdir}/${sid}.port 2>/dev/null); curl -sf "http://localhost:$PORT/json/new?${encodeURIComponent(url)}" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(f\\"tab={d.get('id','')} url={d.get('url','')}\\")" 2>/dev/null || echo "opened ${url}"`;
-        const r = await manager.exec(nodeId, cmd);
-        return ok(nodeId, r.durationMs, r.stdout, `navigate`);
+      if (action === 'navigate') {
+        if (!url) return fail('url required');
+        const u = url.replace(/'/g, "\\'");
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}` +
+          `await page.goto('${u}',{waitUntil:'networkidle2',timeout:${timeout}});` +
+          `console.log('url='+page.url());console.log('title='+await page.title());`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'navigate');
       }
 
       if (action === 'screenshot') {
-        const output = outFile ?? `/tmp/screenshot-${Date.now()}.png`;
-        const target = url ?? (sid ? `$(curl -sf http://localhost:$(cat ${sdir}/${sid}.port)/json/list 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)[0]['url'])" 2>/dev/null)` : 'about:blank');
-        const cmd = `CHROME=$(command -v google-chrome || command -v chromium-browser); $CHROME --headless --no-sandbox --disable-gpu --screenshot="${output}" --window-size=1920,1080 "${target}" 2>/dev/null && echo "saved: ${output} ($(du -h "${output}" | cut -f1))"`;
-        const r = await manager.exec(nodeId, cmd);
+        const out = outFile ?? `/tmp/cdp-screenshot-${Date.now()}.png`;
+        const fp = full_page !== false;
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}` +
+          `await page.screenshot({path:'${out}',fullPage:${fp}});` +
+          `const fs=require('fs');const sz=fs.statSync('${out}').size;` +
+          `console.log('saved: ${out} ('+Math.round(sz/1024)+'KB) '+page.url());`
+        ));
         return ok(nodeId, r.durationMs, r.stdout, 'screenshot');
       }
 
       if (action === 'html') {
-        const target = url ?? 'about:blank';
-        const cmd = `CHROME=$(command -v google-chrome || command -v chromium-browser); $CHROME --headless --no-sandbox --disable-gpu --dump-dom "${target}" 2>/dev/null | head -200`;
-        const r = await manager.exec(nodeId, cmd);
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}` +
+          `const html=await page.content();` +
+          `console.log(html.substring(0,${url ? '50000' : '10000'}));`
+        ));
         return ok(nodeId, r.durationMs, r.stdout, 'html');
       }
 
+      if (action === 'text') {
+        const sel = selector ? `.replace(/'/g,"\\\\'")` : '';
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}` +
+          (selector
+            ? `const el=await page.$('${selector.replace(/'/g, "\\'")}');const t=el?await page.evaluate(e=>e.innerText,el):'(not found)';console.log(t.substring(0,20000));`
+            : `const t=await page.evaluate(()=>document.body.innerText);console.log(t.substring(0,20000));`)
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'text');
+      }
+
       if (action === 'pdf') {
-        const output = outFile ?? `/tmp/page-${Date.now()}.pdf`;
-        const target = url ?? 'about:blank';
-        const cmd = `CHROME=$(command -v google-chrome || command -v chromium-browser); $CHROME --headless --no-sandbox --disable-gpu --print-to-pdf="${output}" --no-pdf-header-footer "${target}" 2>/dev/null && echo "saved: ${output} ($(du -h "${output}" | cut -f1))"`;
-        const r = await manager.exec(nodeId, cmd);
+        const out = outFile ?? `/tmp/cdp-page-${Date.now()}.pdf`;
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}` +
+          `await page.pdf({path:'${out}',format:'A4',printBackground:true});` +
+          `const fs=require('fs');const sz=fs.statSync('${out}').size;` +
+          `console.log('saved: ${out} ('+Math.round(sz/1024)+'KB)');`
+        ));
         return ok(nodeId, r.durationMs, r.stdout, 'pdf');
       }
 
       if (action === 'cookies') {
-        const cmd = `find ${sdir}/${sid}/ -name "Cookies" 2>/dev/null | head -1 | xargs -I{} sqlite3 "{}" "SELECT host_key,name,value,path,expires_utc FROM cookies LIMIT 50;" 2>/dev/null || echo "no cookies DB"`;
-        const r = await manager.exec(nodeId, cmd);
-        return ok(nodeId, r.durationMs, r.stdout, 'cdp cookies');
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}const cookies=await page.cookies();` +
+          `cookies.forEach(c=>console.log(c.domain+'\\t'+c.name+'='+c.value.substring(0,60)+(c.value.length>60?'...':'')));` +
+          `console.log('--- '+cookies.length+' cookies ---');`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'cookies');
+      }
+
+      if (action === 'set-cookies') {
+        if (!value) return fail('value required (JSON array of cookie objects)');
+        const v = value.replace(/'/g, "\\'").replace(/\n/g, '');
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}const cookies=JSON.parse('${v}');` +
+          `await page.setCookie(...cookies);console.log('set '+cookies.length+' cookies');`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'set-cookies');
+      }
+
+      if (action === 'clear-cookies') {
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}const client=await page.createCDPSession();` +
+          `await client.send('Network.clearBrowserCookies');console.log('cookies cleared');`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'clear-cookies');
       }
 
       if (action === 'tabs') {
-        const cmd = `PORT=$(cat ${sdir}/${sid}.port 2>/dev/null); curl -sf http://localhost:$PORT/json/list 2>/dev/null | python3 -c "import json,sys;[print(f\\"{t['id'][:8]}  {t.get('url','')}\\" ) for t in json.load(sys.stdin)]" 2>/dev/null || echo "no tabs"`;
-        const r = await manager.exec(nodeId, cmd);
+        const r = await manager.exec(nodeId, cdpScript(
+          `const pages=await browser.pages();` +
+          `pages.forEach((p,i)=>console.log(i+'  '+p.url().substring(0,100)));` +
+          `console.log('--- '+pages.length+' tabs ---');`
+        ));
         return ok(nodeId, r.durationMs, r.stdout, 'tabs');
       }
 
-      if (action === 'close') {
-        const cmd = `PID=$(cat ${sdir}/${sid}.pid 2>/dev/null); [ -n "$PID" ] && kill $PID 2>/dev/null && rm -rf ${sdir}/${sid}* && echo "closed ${sid}" || echo "not found"`;
-        const r = await manager.exec(nodeId, cmd);
-        return ok(nodeId, r.durationMs, r.stdout, 'close');
+      if (action === 'close-tab') {
+        const r = await manager.exec(nodeId, cdpScript(
+          `const pages=await browser.pages();` +
+          `if(pages.length<=${tabIdx}){console.log('tab ${tabIdx} not found');process.exit(0);}` +
+          `const url=pages[${tabIdx}].url();await pages[${tabIdx}].close();` +
+          `console.log('closed tab ${tabIdx}: '+url);console.log((pages.length-1)+' tabs remaining');`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'close-tab');
       }
 
-      if (action === 'list') {
-        const cmd = `ls ${sdir}/*.pid 2>/dev/null | while read f; do id=$(basename "$f" .pid); port=$(cat ${sdir}/$id.port 2>/dev/null); pid=$(cat "$f"); ps -p $pid >/dev/null 2>&1 && s="running" || s="dead"; echo "$id  port=$port  pid=$pid  $s"; done || echo "no sessions"`;
-        const r = await manager.exec(nodeId, cmd);
-        return ok(nodeId, r.durationMs, r.stdout, 'cdp sessions');
+      if (action === 'evaluate') {
+        if (!value) return fail('value required (JavaScript to evaluate in page context)');
+        const js = value.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}const result=await page.evaluate(()=>{${js}});` +
+          `console.log(typeof result==='object'?JSON.stringify(result,null,2):String(result));`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'evaluate');
+      }
+
+      if (action === 'click') {
+        if (!selector) return fail('selector required');
+        const sel = selector.replace(/'/g, "\\'");
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}await page.waitForSelector('${sel}',{timeout:${timeout}});` +
+          `await page.click('${sel}');console.log('clicked: ${sel}');` +
+          `await new Promise(r=>setTimeout(r,500));console.log('url='+page.url());`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'click');
+      }
+
+      if (action === 'type') {
+        if (!selector || !value) return fail('selector and value required');
+        const sel = selector.replace(/'/g, "\\'");
+        const val = value.replace(/'/g, "\\'");
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}await page.waitForSelector('${sel}',{timeout:${timeout}});` +
+          `await page.type('${sel}','${val}');console.log('typed ${value.length} chars into ${sel}');`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'type');
+      }
+
+      if (action === 'wait') {
+        if (!selector) return fail('selector required');
+        const sel = selector.replace(/'/g, "\\'");
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}const el=await page.waitForSelector('${sel}',{timeout:${timeout}});` +
+          `const tag=await page.evaluate(e=>e.tagName+' '+e.className,el);` +
+          `console.log('found: ${sel} → '+tag);`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'wait');
+      }
+
+      if (action === 'select') {
+        if (!selector) return fail('selector required');
+        const sel = selector.replace(/'/g, "\\'");
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}const els=await page.$$('${sel}');` +
+          `const results=[];for(const el of els.slice(0,20)){` +
+          `const d=await page.evaluate(e=>({tag:e.tagName,text:e.innerText?.substring(0,200),href:e.href||'',src:e.src||''}),el);` +
+          `results.push(d);}` +
+          `console.log(JSON.stringify(results,null,2));console.log('--- '+els.length+' matches ---');`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'select');
+      }
+
+      if (action === 'network') {
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}const client=await page.createCDPSession();` +
+          `const entries=[];client.on('Network.responseReceived',e=>{entries.push({url:e.response.url.substring(0,100),status:e.response.status,type:e.type});});` +
+          `await client.send('Network.enable');` +
+          `await page.reload({waitUntil:'networkidle2',timeout:${timeout}});` +
+          `await client.send('Network.disable');` +
+          `entries.slice(0,30).forEach(e=>console.log(e.status+' '+e.type.padEnd(12)+' '+e.url));` +
+          `console.log('--- '+entries.length+' requests ---');`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'network');
+      }
+
+      if (action === 'viewport') {
+        const w = width ?? 1920;
+        const h = height ?? 1080;
+        const r = await manager.exec(nodeId, cdpScript(
+          `${getPage}await page.setViewport({width:${w},height:${h}});` +
+          `console.log('viewport set to ${w}x${h}');`
+        ));
+        return ok(nodeId, r.durationMs, r.stdout, 'viewport');
       }
 
       return fail('Invalid action or missing params');
