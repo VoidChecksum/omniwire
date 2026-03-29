@@ -160,7 +160,7 @@ function dispatchBg(node: string, label: string, fn: () => Promise<McpResult>): 
 export function createOmniWireServer(manager: NodeManager, transfer: TransferEngine): McpServer {
   const server = new McpServer({
     name: 'omniwire',
-    version: '2.6.0',
+    version: '2.6.1',
   });
 
   // -- Auto-inject `background` param into every tool -------------------------
@@ -1004,13 +1004,16 @@ tags: ${meshNode.tags.join(', ')}`;
   // --- Tool 30: omniwire_vpn ---
   server.tool(
     'omniwire_vpn',
-    'Manage VPN on mesh nodes (Mullvad/OpenVPN/WireGuard). SAFE: uses split-tunneling or network namespaces — mesh connectivity (WireGuard, SSH) is never disrupted. Use via_vpn on omniwire_exec to route individual commands through VPN.',
+    'Manage VPN on mesh nodes (Mullvad/OpenVPN/WireGuard/Tailscale). Mesh-safe: split-tunnel or namespace isolation. Mullvad advanced: multi-hop, DAITA, quantum-resistant tunnels, DNS-over-HTTPS, obfuscation, kill-switch.',
     {
-      action: z.enum(['connect', 'disconnect', 'status', 'list', 'ip', 'rotate', 'full-on', 'full-off']).describe('connect=start VPN (split-tunnel, mesh safe), disconnect=stop, status=current state, list=servers/relays, ip=public IP, rotate=new exit, full-on=node-wide VPN with mesh exclusions, full-off=restore default routing'),
+      action: z.enum([
+        'connect', 'disconnect', 'status', 'list', 'ip', 'rotate', 'full-on', 'full-off',
+        'multihop', 'daita', 'quantum', 'obfuscation', 'dns', 'killswitch', 'split-tunnel', 'relay-set', 'account', 'settings'
+      ]).describe('Core: connect/disconnect/status/list/ip/rotate/full-on/full-off. Mullvad: multihop (on/off/entry:exit), daita (on/off), quantum (on/off), obfuscation (on/off/udp2tcp/shadowsocks), dns (custom/default), killswitch (on/off), split-tunnel (add/remove/list pid), relay-set (set relay constraints), account (info), settings (show all)'),
       node: z.string().optional().describe('Node to manage VPN on (default: contabo)'),
       provider: z.enum(['mullvad', 'openvpn', 'wireguard', 'tailscale']).optional().describe('VPN provider (default: auto-detect)'),
-      server: z.string().optional().describe('Server/relay to connect to. Mullvad: country code (us, de, se) or relay name. OpenVPN: config file path. WireGuard: interface name. Tailscale: exit node hostname.'),
-      config: z.string().optional().describe('OpenVPN config file path (for openvpn provider)'),
+      server: z.string().optional().describe('Server/relay. Mullvad: country (se), city (se-got), relay (se-got-wg-001). OpenVPN: config path. WireGuard: interface. Tailscale: exit node.'),
+      config: z.string().optional().describe('Config file path or feature value. For multihop: "entry:exit" (e.g. "se:us"). For dns: IP address. For obfuscation: "udp2tcp" or "shadowsocks". For split-tunnel: PID or process name.'),
     },
     async ({ action, node, provider, server: vpnServer, config }) => {
       const nodeId = node ?? 'contabo';
@@ -1049,6 +1052,108 @@ tags: ${meshNode.tags.join(', ')}`;
           case 'rotate': {
             const result = await manager.exec(nodeId, `${splitSetup} mullvad disconnect && sleep 1 && mullvad relay set tunnel-protocol wireguard && mullvad connect && sleep 2 && mullvad status && echo "---ip---" && curl -s --max-time 5 https://am.i.mullvad.net/json | grep -E "ip|country|mullvad_exit"`);
             return ok(nodeId, result.durationMs, result.stdout, 'mullvad rotate');
+          }
+          case 'multihop': {
+            // Multi-hop: traffic enters at one relay, exits at another. config = "entry:exit" e.g. "se:us"
+            if (!config && !vpnServer) {
+              // Toggle or show status
+              const result = await manager.exec(nodeId, 'mullvad tunnel get | grep -i multihop');
+              return ok(nodeId, result.durationMs, result.stdout, 'mullvad multihop status');
+            }
+            const toggle = config === 'off' ? 'off' : 'on';
+            let cmd = `mullvad tunnel set wireguard --multihop=${toggle}`;
+            if (toggle === 'on' && config && config.includes(':')) {
+              const [entry, exit] = config.split(':');
+              cmd += ` && mullvad relay set location ${exit} && mullvad relay set tunnel wireguard entry-location ${entry}`;
+            } else if (vpnServer && toggle === 'on') {
+              cmd += ` && mullvad relay set location ${vpnServer}`;
+            }
+            cmd += ' && mullvad status';
+            const result = await manager.exec(nodeId, cmd);
+            return ok(nodeId, result.durationMs, result.stdout, `mullvad multihop ${toggle}`);
+          }
+          case 'daita': {
+            // DAITA: Defence Against AI-guided Traffic Analysis — pads packets to hide traffic patterns
+            const toggle = config === 'off' ? 'off' : 'on';
+            const result = await manager.exec(nodeId, `mullvad tunnel set wireguard --daita=${toggle} 2>&1 && mullvad tunnel get | grep -i daita && mullvad status`);
+            return ok(nodeId, result.durationMs, result.stdout, `mullvad daita ${toggle}`);
+          }
+          case 'quantum': {
+            // Quantum-resistant tunneling: post-quantum key exchange on WireGuard
+            const toggle = config === 'off' ? 'off' : 'on';
+            const result = await manager.exec(nodeId, `mullvad tunnel set wireguard --quantum-resistant=${toggle} 2>&1 && mullvad tunnel get | grep -i quantum && mullvad status`);
+            return ok(nodeId, result.durationMs, result.stdout, `mullvad quantum ${toggle}`);
+          }
+          case 'obfuscation': {
+            // Obfuscation: bypass DPI. Modes: auto, off, udp2tcp, shadowsocks
+            const mode = config ?? 'auto';
+            const result = await manager.exec(nodeId, `mullvad obfuscation set mode ${mode} 2>&1 && mullvad obfuscation get && mullvad status`);
+            return ok(nodeId, result.durationMs, result.stdout, `mullvad obfuscation ${mode}`);
+          }
+          case 'dns': {
+            // Custom DNS: set DNS server or reset to default (Mullvad DNS)
+            if (!config || config === 'default') {
+              const result = await manager.exec(nodeId, 'mullvad dns set default 2>&1 && mullvad dns get');
+              return ok(nodeId, result.durationMs, result.stdout, 'mullvad dns default');
+            }
+            // config = IP address or "content-blockers" for Mullvad's ad/tracker blocking DNS
+            const cmd = config === 'adblock'
+              ? 'mullvad dns set custom --block-ads --block-trackers --block-malware 2>&1 && mullvad dns get'
+              : `mullvad dns set custom ${config} 2>&1 && mullvad dns get`;
+            const result = await manager.exec(nodeId, cmd);
+            return ok(nodeId, result.durationMs, result.stdout, `mullvad dns ${config}`);
+          }
+          case 'killswitch': {
+            // Kill switch: block all traffic if VPN disconnects
+            const toggle = config === 'off' ? 'off' : 'on';
+            const blockWhen = toggle === 'on' ? 'always' : 'only-when-connected';
+            const result = await manager.exec(nodeId, `mullvad always-require-vpn set ${blockWhen} 2>&1 && mullvad always-require-vpn get && mullvad lan set allow`);
+            return ok(nodeId, result.durationMs, result.stdout, `mullvad killswitch ${toggle}`);
+          }
+          case 'split-tunnel': {
+            // Split tunnel: exclude specific apps/PIDs from VPN
+            if (!config || config === 'list') {
+              const result = await manager.exec(nodeId, 'mullvad split-tunnel get 2>&1');
+              return ok(nodeId, result.durationMs, result.stdout, 'mullvad split-tunnel list');
+            }
+            if (config.startsWith('add:')) {
+              const pid = config.slice(4);
+              const result = await manager.exec(nodeId, `mullvad split-tunnel add ${pid} 2>&1 && mullvad split-tunnel get`);
+              return ok(nodeId, result.durationMs, result.stdout, `mullvad split-tunnel add ${pid}`);
+            }
+            if (config.startsWith('remove:') || config.startsWith('del:')) {
+              const pid = config.slice(config.indexOf(':') + 1);
+              const result = await manager.exec(nodeId, `mullvad split-tunnel delete ${pid} 2>&1 && mullvad split-tunnel get`);
+              return ok(nodeId, result.durationMs, result.stdout, `mullvad split-tunnel remove ${pid}`);
+            }
+            // Toggle state
+            const toggle = config === 'off' ? 'off' : 'on';
+            const result = await manager.exec(nodeId, `mullvad split-tunnel set state ${toggle} 2>&1 && mullvad split-tunnel get`);
+            return ok(nodeId, result.durationMs, result.stdout, `mullvad split-tunnel ${toggle}`);
+          }
+          case 'relay-set': {
+            // Set relay constraints: protocol, location, custom lists
+            if (!config && !vpnServer) {
+              const result = await manager.exec(nodeId, 'mullvad relay get 2>&1');
+              return ok(nodeId, result.durationMs, result.stdout, 'mullvad relay config');
+            }
+            const loc = vpnServer ?? '';
+            let cmd = '';
+            if (loc) cmd += `mullvad relay set location ${loc}; `;
+            if (config === 'wireguard' || config === 'wg') cmd += 'mullvad relay set tunnel-protocol wireguard; ';
+            if (config === 'openvpn') cmd += 'mullvad relay set tunnel-protocol openvpn; ';
+            if (config === 'any') cmd += 'mullvad relay set tunnel-protocol any; ';
+            cmd += 'mullvad relay get && mullvad status';
+            const result = await manager.exec(nodeId, cmd);
+            return ok(nodeId, result.durationMs, result.stdout, `mullvad relay ${loc || config || 'get'}`);
+          }
+          case 'account': {
+            const result = await manager.exec(nodeId, 'mullvad account get 2>&1');
+            return ok(nodeId, result.durationMs, result.stdout, 'mullvad account');
+          }
+          case 'settings': {
+            const result = await manager.exec(nodeId, 'mullvad status && echo "===tunnel===" && mullvad tunnel get && echo "===relay===" && mullvad relay get && echo "===dns===" && mullvad dns get && echo "===obfuscation===" && mullvad obfuscation get && echo "===split-tunnel===" && mullvad split-tunnel get 2>/dev/null && echo "===killswitch===" && mullvad always-require-vpn get 2>/dev/null');
+            return ok(nodeId, result.durationMs, result.stdout, 'mullvad all settings');
           }
         }
       }
