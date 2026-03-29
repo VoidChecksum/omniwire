@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0D1117" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP_Tools-81-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
+  <img src="https://img.shields.io/badge/MCP_Tools-86-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
   <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&labelColor=0D1117" alt="A2A" />
   <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
   <img src="https://img.shields.io/badge/CyberBase-Sync-CC93E6?style=for-the-badge&labelColor=0D1117" alt="cyberbase" />
@@ -19,7 +19,7 @@
 
 **The infrastructure layer for AI agent swarms.**
 
-82 MCP tools · A2A protocol · OmniMesh VPN · nftables firewall · CDP browser · cookie sync · 2FA TOTP · CyberBase persistence
+86 MCP tools · A2A protocol · OmniMesh VPN · nftables firewall · CDP browser · cookie sync · 2FA TOTP · bi-directional sync · CyberBase persistence
 
 </div>
 
@@ -214,7 +214,7 @@ graph TB
         direction TB
         MCP["MCP Protocol Layer<br/>stdio | SSE | REST"]
 
-        subgraph tools["81 Tools"]
+        subgraph tools["86 Tools"]
             direction LR
             EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline  bg"]
             AGENT["Agentic<br/>store  watch  task<br/>a2a  events  locks"]
@@ -687,6 +687,7 @@ omniwire/
 
 | Version | Date | Changes |
 |---------|------|---------|
+| **v3.2.2** | 2026-03-30 | Fix: sync GitHub/npm metadata — badge, description, mermaid diagram all reflect 86 tools |
 | **v3.2.1** | 2026-03-30 | New: 5 bi-directional sync tools (`omniwire_sync`, `omniwire_sync_rules`, `omniwire_sync_hooks`, `omniwire_sync_memory`, `omniwire_sync_agents`) — 86 tools total |
 | **v3.2.0** | 2026-03-29 | New: `omniwire_2fa` TOTP manager — add/generate/verify/import/export 2FA codes, CyberBase + 1Password persistence, otpauth:// URI import, bulk code generation |
 | **v3.1.5** | 2026-03-29 | Fix: skip auto-audit batch entries from Obsidian vault + Canvas sync to prevent junk files |
