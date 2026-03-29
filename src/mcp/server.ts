@@ -163,7 +163,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
   // --- Tool 1: omniwire_exec ---
   server.tool(
     'omniwire_exec',
-    'Execute a command on a mesh node. Supports retry, assertions, JSON output, and result storage for agentic chaining.',
+    'Execute a command on a mesh node. Set background=true for async dispatch (returns task ID, poll with omniwire_bg). Supports retry, assert, JSON, store_as, {{key}} interpolation.',
     {
       node: z.string().optional().describe('Target node id (windows, contabo, hostinger, thinkpad). Auto-selects if omitted.'),
       command: z.string().optional().describe('Shell command to run. Use {{key}} to interpolate stored results from previous calls.'),
