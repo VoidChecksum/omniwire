@@ -50,6 +50,147 @@ Add to your AI agent (Claude Code, Cursor, OpenCode, etc.):
 
 ---
 
+## Use Cases
+
+<table>
+<tr>
+<td width="50%">
+
+### DevOps & Infrastructure
+```bash
+# Deploy to all nodes in one call
+omniwire_deploy(src="contabo:/app/v2.tar.gz", dst="/opt/app/")
+
+# Rolling service restart
+omniwire_batch([
+  {node: "node1", command: "systemctl restart app"},
+  {node: "node2", command: "systemctl restart app"}
+], parallel=false)
+
+# Monitor disk across fleet
+omniwire_disk_usage()
+```
+
+</td>
+<td width="50%">
+
+### Security & Pentesting
+```bash
+# Anonymous nmap through Mullvad VPN
+omniwire_exec(
+  node="contabo",
+  command="nmap -sV -T4 target.com",
+  via_vpn="mullvad:se",
+  background=true
+)
+
+# Rotate exit IP between scans
+omniwire_vpn(action="rotate", node="contabo")
+
+# Run nuclei through VPN namespace
+omniwire_exec(command="nuclei -u target.com",
+  via_vpn="mullvad", store_as="nuclei_results")
+```
+
+</td>
+</tr>
+<tr>
+<td>
+
+### Multi-Agent Coordination
+```bash
+# Agent A dispatches work
+omniwire_task_queue(action="enqueue",
+  queue="recon", task="subfinder -d target.com")
+
+# Agent B picks it up
+omniwire_task_queue(action="dequeue", queue="recon")
+
+# Share findings on blackboard
+omniwire_blackboard(action="post",
+  topic="subdomains", data="api.target.com")
+
+# A2A messaging between agents
+omniwire_a2a_message(action="send",
+  channel="results", message="scan complete")
+```
+
+</td>
+<td>
+
+### Background & Async Workflows
+```bash
+# Long build in background
+omniwire_exec(
+  command="docker build -t app .",
+  node="contabo", background=true
+)
+# Returns: "BACKGROUND bg-abc123"
+
+# Check progress
+omniwire_bg(action="poll", task_id="bg-abc123")
+# Returns: "RUNNING (45.2s)"
+
+# Get result when done
+omniwire_bg(action="result", task_id="bg-abc123")
+
+# Pipeline: build → test → deploy
+omniwire_pipeline(steps=[
+  {node: "contabo", command: "make build"},
+  {node: "contabo", command: "make test"},
+  {command: "deploy.sh", store_as: "version"}
+])
+```
+
+</td>
+</tr>
+<tr>
+<td>
+
+### File Operations
+```bash
+# Transfer large dataset between nodes
+omniwire_transfer_file(
+  src="contabo:/data/model.bin",
+  dst="hostinger:/ml/model.bin"
+)
+# Auto-selects: aria2c (16-conn parallel)
+
+# Sync config to all nodes
+omniwire_deploy(
+  src_node="contabo",
+  src_path="/etc/nginx/nginx.conf",
+  dst_path="/etc/nginx/nginx.conf"
+)
+```
+
+</td>
+<td>
+
+### VPN & Anonymous Operations
+```bash
+# Full Mullvad setup for a node
+omniwire_vpn(action="connect", server="se",
+  node="contabo")
+omniwire_vpn(action="quantum", config="on")
+omniwire_vpn(action="daita", config="on")
+omniwire_vpn(action="multihop", config="se:us")
+omniwire_vpn(action="dns", config="adblock")
+omniwire_vpn(action="killswitch", config="on")
+
+# Verify anonymous IP
+omniwire_vpn(action="ip", node="contabo")
+
+# Node-wide VPN (mesh stays connected)
+omniwire_vpn(action="full-on", server="de")
+```
+
+</td>
+</tr>
+</table>
+
+---
+
 ## Architecture
 
 ```mermaid
