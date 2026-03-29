@@ -1,6 +1,6 @@
 {
   "name": "omniwire",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Infrastructure layer for AI agent swarms — 82 MCP tools · A2A · OmniMesh VPN · firewall · CDP · cookies · 2FA TOTP · CyberBase · background dispatch",
   "license": "GPL-3.0-only",
   "type": "module",

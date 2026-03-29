@@ -632,7 +632,7 @@ Create `~/.omniwire/mesh.json`:
 <details>
 <summary><b>v2.5.1 -- Universal Background Dispatch</b></summary>
 
-**`background: true`** auto-injected into all 81 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
+**`background: true`** auto-injected into all 86 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
 
 </details>
 
@@ -671,7 +671,7 @@ Security fixes, multi-path SSH failover, CyberBase integration, VaultBridge Obsi
 ```
 omniwire/
   src/
-    mcp/           MCP server (81 tools, 3 transports)
+    mcp/           MCP server (86 tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
     sync/          CyberSync + CyberBase (PostgreSQL, Obsidian, encryption)
     protocol/      Mesh config, types, path parsing
@@ -687,6 +687,7 @@ omniwire/
 
 | Version | Date | Changes |
 |---------|------|---------|
+| **v3.2.1** | 2026-03-30 | New: 5 bi-directional sync tools (`omniwire_sync`, `omniwire_sync_rules`, `omniwire_sync_hooks`, `omniwire_sync_memory`, `omniwire_sync_agents`) — 86 tools total |
 | **v3.2.0** | 2026-03-29 | New: `omniwire_2fa` TOTP manager — add/generate/verify/import/export 2FA codes, CyberBase + 1Password persistence, otpauth:// URI import, bulk code generation |
 | **v3.1.5** | 2026-03-29 | Fix: skip auto-audit batch entries from Obsidian vault + Canvas sync to prevent junk files |
 | **v3.1.4** | 2026-03-29 | Auto-sync CyberBase writes to Obsidian vault + Canvas mindmap, collision-avoidance grid placement, `sync-obsidian` / `sync-canvas` actions in knowledge tool |
