@@ -253,7 +253,8 @@ function sqlEscape(val: string): string {
 /** Fire-and-forget write to CyberBase + Obsidian vault + Canvas. Never blocks, never throws. */
 function cb(category: string, key: string, value: string) {
   // Sync to Obsidian vault + Canvas mindmap (local, synchronous, best-effort)
-  syncVault(category, key, value);
+  // Skip auto-audit batch entries — they pollute vault/canvas with junk
+  if (!key.startsWith('batch-')) syncVault(category, key, value);
   // Sync to CyberBase PostgreSQL (remote, async, queued)
   if (!cbManager || cbCircuitOpen()) return;
   const valEsc = sqlEscape(value).slice(0, 50000);

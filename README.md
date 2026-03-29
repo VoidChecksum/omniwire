@@ -687,6 +687,7 @@ omniwire/
 
 | Version | Date | Changes |
 |---------|------|---------|
+| **v3.1.5** | 2026-03-29 | Fix: skip auto-audit batch entries from Obsidian vault + Canvas sync to prevent junk files |
 | **v3.1.4** | 2026-03-29 | Auto-sync CyberBase writes to Obsidian vault + Canvas mindmap, collision-avoidance grid placement, `sync-obsidian` / `sync-canvas` actions in knowledge tool |
 | **v3.1.3** | 2026-03-29 | OmniMesh WireGuard mesh manager, event bus (Webhook/WS/SSE), knowledge tool (12 actions), auto-update system, CDP rewrite (persistent Docker container, 18 actions), mesh expose/gateway, CyberBase circuit breaker + SQL hardening |
 | **v3.1.2** | 2026-03-28 | Collapsible tool sections in README, npm README sync |
