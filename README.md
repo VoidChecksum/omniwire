@@ -350,131 +350,166 @@ watch(assert="ready")       poll until
 
 ## All 81 Tools
 
-> **Every tool** supports `background: true` -- returns a task ID immediately. Poll with `omniwire_bg`.
+> **Every tool** supports `background: true` — returns a task ID immediately. Poll with `omniwire_bg`.
 
-### Execution (6)
-
-| Tool | Description |
-|------|-------------|
-| `omniwire_exec` | Run command on any node. `retry`, `assert`, `store_as`, `format:"json"`, `{{key}}`, `via_vpn` for anonymous scanning. |
-| `omniwire_run` | Execute multi-line scripts via temp file. Keeps tool call UI clean. |
-| `omniwire_batch` | N commands in 1 call. Chaining with `{{prev}}`, `abort_on_fail`, parallel or sequential. |
-| `omniwire_broadcast` | Execute on all nodes simultaneously. JSON format support. |
-| `omniwire_pipeline` | Multi-step DAG. `{{prev}}`/`{{stepN}}` interpolation, per-step error handling, cross-node. |
-| `omniwire_bg` | List, poll, or retrieve results from background tasks. |
-
-### Agentic / A2A (13)
+<details>
+<summary><b>Execution (6)</b></summary>
 
 | Tool | Description |
 |------|-------------|
-| `omniwire_store` | Session key-value store. Persist results across tool calls for chaining. |
-| `omniwire_watch` | Poll command until assert pattern matches. For deploys, builds, service readiness. |
-| `omniwire_healthcheck` | Parallel health probe across all nodes (connectivity, disk, mem, load, docker). Single call. |
-| `omniwire_agent_task` | Dispatch background tasks. Get task IDs, poll status, retrieve results. A2A async. |
-| `omniwire_a2a_message` | Agent-to-agent message queues. Send/receive/peek on named channels. |
-| `omniwire_semaphore` | Distributed locking. Atomic acquire/release to prevent race conditions. |
-| `omniwire_event` | Pub/sub events. Emit/poll timestamped events per topic. ACP/A2A/ACPX compatible. |
-| `omniwire_workflow` | Define and run reusable named workflows (DAGs). Stored on disk, triggered by any agent. |
-| `omniwire_agent_registry` | Register/discover agents by capabilities. Dynamic A2A routing. Heartbeat. |
-| `omniwire_blackboard` | Shared blackboard for agent swarms. Post findings, read, search across topics. |
-| `omniwire_task_queue` | Distributed task queue. Enqueue/dequeue with priorities. Complete/fail reporting. |
-| `omniwire_capability` | Query node capabilities (tools, runtimes, GPU). Intelligent task routing. |
+| `omniwire_exec` | Run command on any node. `retry`, `assert`, `store_as`, `format:"json"`, `{{key}}`, `via_vpn`. |
+| `omniwire_run` | Multi-line scripts via temp file. |
+| `omniwire_batch` | N commands in 1 call. Chaining `{{prev}}`, `abort_on_fail`, parallel/sequential. |
+| `omniwire_broadcast` | Execute on all nodes simultaneously. |
+| `omniwire_pipeline` | Multi-step DAG with `{{prev}}`/`{{stepN}}` interpolation. |
+| `omniwire_bg` | List/poll/retrieve background task results. |
 
-### Files & Transfer (6)
+</details>
+
+<details>
+<summary><b>Agentic / A2A (12)</b></summary>
 
 | Tool | Description |
 |------|-------------|
-| `omniwire_read_file` | Read file from any node. `node:/path` format. |
+| `omniwire_store` | Session key-value store for cross-call chaining. |
+| `omniwire_watch` | Poll until assert matches — deploys, builds, readiness. |
+| `omniwire_healthcheck` | Parallel health probe all nodes (disk, mem, load, docker). |
+| `omniwire_agent_task` | Background task dispatch with poll/retrieve. |
+| `omniwire_a2a_message` | Agent-to-agent message queues (send/receive/peek). |
+| `omniwire_semaphore` | Distributed locking — atomic acquire/release. |
+| `omniwire_event` | Pub/sub events per topic. |
+| `omniwire_workflow` | Reusable named workflow DAGs. |
+| `omniwire_agent_registry` | Agent capability discovery + heartbeat. |
+| `omniwire_blackboard` | Shared blackboard for swarm coordination. |
+| `omniwire_task_queue` | Distributed priority queue — enqueue/dequeue/complete. |
+| `omniwire_capability` | Query node capabilities for intelligent routing. |
+
+</details>
+
+<details>
+<summary><b>Files & Transfer (6)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_read_file` | Read file from any node (`node:/path`). |
 | `omniwire_write_file` | Write/create file on any node. |
 | `omniwire_list_files` | List directory contents. |
-| `omniwire_find_files` | Glob search across all nodes. |
-| `omniwire_transfer_file` | Copy between nodes. Auto-selects SFTP/netcat/aria2c. |
-| `omniwire_deploy` | Deploy file from one node to all others in parallel. |
+| `omniwire_find_files` | Glob search across nodes. |
+| `omniwire_transfer_file` | Copy between nodes (auto SFTP/netcat/aria2c). |
+| `omniwire_deploy` | Deploy one file to all nodes in parallel. |
 
-### Monitoring (3)
+</details>
+
+<details>
+<summary><b>Monitoring (3)</b></summary>
 
 | Tool | Description |
 |------|-------------|
-| `omniwire_mesh_status` | Health, latency, CPU/mem/disk for all nodes. Tabular output. |
-| `omniwire_node_info` | Detailed info for a specific node. |
+| `omniwire_mesh_status` | Health, latency, CPU/mem/disk — all nodes. |
+| `omniwire_node_info` | Detailed info for one node. |
 | `omniwire_live_monitor` | Snapshot metrics: cpu, memory, disk, network. |
 
-### System & DevOps (12)
+</details>
+
+<details>
+<summary><b>System & DevOps (12)</b></summary>
 
 | Tool | Description |
 |------|-------------|
-| `omniwire_process_list` | List/filter processes across nodes |
-| `omniwire_disk_usage` | Disk usage for all nodes |
-| `omniwire_tail_log` | Last N lines of a log file |
-| `omniwire_install_package` | Install via apt/npm/pip |
-| `omniwire_service_control` | systemd start/stop/restart/status |
-| `omniwire_docker` | Docker commands on any node |
-| `omniwire_kernel` | dmesg, sysctl, modprobe, lsmod, strace, perf |
-| `omniwire_cron` | List/add/remove cron jobs |
-| `omniwire_env` | Get/set persistent environment variables |
-| `omniwire_network` | ping, traceroute, dns, ports, speed, connections |
-| `omniwire_git` | Git commands on repos on any node |
-| `omniwire_syslog` | Query journalctl with filters |
+| `omniwire_process_list` | List/filter processes across nodes. |
+| `omniwire_disk_usage` | Disk usage for all nodes. |
+| `omniwire_tail_log` | Last N lines of a log file. |
+| `omniwire_install_package` | Install via apt/npm/pip. |
+| `omniwire_service_control` | systemd start/stop/restart/status. |
+| `omniwire_docker` | Docker commands on any node. |
+| `omniwire_kernel` | dmesg, sysctl, modprobe, lsmod, strace, perf. |
+| `omniwire_cron` | List/add/remove cron jobs. |
+| `omniwire_env` | Get/set persistent environment variables. |
+| `omniwire_network` | ping, traceroute, dns, ports, speed, connections. |
+| `omniwire_git` | Git commands on repos on any node. |
+| `omniwire_syslog` | Query journalctl with filters. |
 
-### Network, VPN & Security (9)
+</details>
 
-| Tool | Description |
-|------|-------------|
-| `omniwire_firewall` | nftables firewall engine. Presets (server/paranoid/pentest), rate-limit, geo-block, port-knock, ban/unban, audit. Mesh always whitelisted. |
-| `omniwire_vpn` | VPN (Mullvad/OpenVPN/WireGuard/Tailscale). Multi-hop, DAITA, quantum, obfuscation, killswitch. Mesh-safe. |
-| `omniwire_cookies` | Cookie management. JSON/Header/Netscape formats. Browser extract, CyberBase + 1Password sync. |
-| `omniwire_cdp` | Chrome DevTools Protocol. Launch headless Chrome, screenshot, PDF, DOM dump, cookie extract. |
-| `omniwire_proxy` | HTTP/SOCKS proxy management. Start/stop proxies on any node. |
-| `omniwire_dns` | DNS management. Resolve, set server, flush cache, block domains. |
-| `omniwire_port_forward` | Create/list/close SSH tunnels |
-| `omniwire_shell` | Persistent PTY session (preserves cwd/env) |
-| `omniwire_clipboard` | Shared clipboard buffer across mesh |
-
-### Infrastructure (9)
+<details>
+<summary><b>Network, VPN & Security (9)</b></summary>
 
 | Tool | Description |
 |------|-------------|
-| `omniwire_backup` | Snapshot/restore paths on any node. Diff, cleanup, retention policies. |
-| `omniwire_container` | Full Docker lifecycle. Compose up/down, build, push, logs, prune, stats. |
-| `omniwire_cert` | TLS certificates. Let's Encrypt issue/renew, check expiry, self-signed generation. |
-| `omniwire_user` | User & SSH key management. Add/remove users, deploy keys, sudo config. |
-| `omniwire_schedule` | Distributed cron with failover. Add/remove/list/run-now scheduled tasks. |
-| `omniwire_alert` | Threshold alerting. Disk/mem/load/offline checks with webhook notifications. |
-| `omniwire_log_aggregate` | Cross-node log search. Grep journalctl/syslog across all nodes in parallel. |
-| `omniwire_benchmark` | Node performance testing. CPU/memory/disk/network benchmarks. |
-| `omniwire_stream` | Capture streaming output (tail -f, watch) |
+| `omniwire_firewall` | nftables engine — presets, rate-limit, geo-block, port-knock, ban/unban. Mesh whitelisted. |
+| `omniwire_vpn` | Mullvad/OpenVPN/WireGuard/Tailscale — multi-hop, DAITA, quantum, killswitch. Mesh-safe. |
+| `omniwire_cookies` | Cookie management — JSON/Header/Netscape, browser extract, CyberBase + 1Password sync. |
+| `omniwire_cdp` | Chrome DevTools Protocol — headless Chrome, screenshot, PDF, DOM, cookies. |
+| `omniwire_proxy` | HTTP/SOCKS proxy management on any node. |
+| `omniwire_dns` | DNS resolve, set server, flush cache, block domains. |
+| `omniwire_port_forward` | SSH tunnels — create/list/close/mesh-expose. |
+| `omniwire_shell` | Persistent PTY session (preserves cwd/env). |
+| `omniwire_clipboard` | Shared clipboard buffer across mesh. |
 
-### Agent Toolkit (7)
+</details>
 
-| Tool | Description |
-|------|-------------|
-| `omniwire_snippet` | Save/run reusable command templates with `{{var}}` substitution. |
-| `omniwire_alias` | In-session command shortcuts. Set/run aliases. |
-| `omniwire_trace` | Distributed tracing. Start/stop/view span waterfalls across nodes. |
-| `omniwire_doctor` | Health diagnostics. Checks SSH, disk, mem, docker, WireGuard, tools, CyberBase. |
-| `omniwire_metrics` | Prometheus-compatible metrics. Scrape/export node stats. |
-| `omniwire_audit` | Command audit log. View/search/stats on all executed commands. |
-| `omniwire_plugin` | Plugin system. List/load plugins from `~/.omniwire/plugins/`. |
-| `omniwire_omnimesh` | OmniMesh — built-in WireGuard mesh manager. Init/up/down/add-peer/sync-peers/health/rotate-keys/topology across all OS. |
-| `omniwire_mesh_expose` | Expose localhost-bound services to the entire mesh. Discover/expose/unexpose/expose-remote. |
-| `omniwire_mesh_gateway` | Auto-expose all localhost services mesh-wide. Sync/teardown/add-rule/remove-rule. |
-| `omniwire_events` | Event bus with Webhook + WebSocket + SSE. Publish events, manage webhooks, query log. |
-| `omniwire_knowledge` | CyberBase knowledge CRUD + text/semantic search + health + vacuum + bulk-set + export. |
-
-### CyberSync (9)
+<details>
+<summary><b>Infrastructure (9)</b></summary>
 
 | Tool | Description |
 |------|-------------|
-| `cybersync_status` | Sync status, item counts, pending syncs |
-| `cybersync_sync_now` | Trigger immediate reconciliation |
-| `cybersync_diff` | Show local vs database differences |
-| `cybersync_history` | Query sync event log |
-| `cybersync_search_knowledge` | Full-text search unified knowledge base |
-| `cybersync_get_memory` | Retrieve Claude memory from PostgreSQL |
-| `cybersync_manifest` | Show tracked files per tool |
-| `cybersync_force_push` | Force push file to all nodes |
-| `omniwire_secrets` | Get/set/delete/list/sync secrets (1Password, file, env) |
-| `omniwire_update` | Self-update OmniWire |
+| `omniwire_backup` | Snapshot/restore paths. Diff, cleanup, retention. |
+| `omniwire_container` | Docker lifecycle — compose, build, push, logs, prune, stats. |
+| `omniwire_cert` | TLS certs — Let's Encrypt, check expiry, self-signed. |
+| `omniwire_user` | User & SSH key management, sudo config. |
+| `omniwire_schedule` | Distributed cron with failover. |
+| `omniwire_alert` | Threshold alerting — disk/mem/load/offline + webhook notify. |
+| `omniwire_log_aggregate` | Cross-node log search in parallel. |
+| `omniwire_benchmark` | CPU/memory/disk/network benchmarks. |
+| `omniwire_stream` | Capture streaming output (tail -f, watch). |
+
+</details>
+
+<details>
+<summary><b>OmniMesh & Events (6)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_omnimesh` | WireGuard mesh manager — init/up/down/add-peer/sync-peers/health/rotate-keys/topology. All OS. |
+| `omniwire_mesh_expose` | Expose localhost services to mesh — discover/expose/unexpose/expose-remote. |
+| `omniwire_mesh_gateway` | Auto-expose all localhost services mesh-wide. |
+| `omniwire_events` | Webhook + WebSocket + SSE event bus. Publish, manage webhooks, query log. |
+| `omniwire_knowledge` | CyberBase knowledge CRUD, text/semantic search, health, vacuum, bulk-set, export. |
+| `omniwire_update` | Self-update from npm + GitHub. Auto-update, mesh-wide push. |
+
+</details>
+
+<details>
+<summary><b>Agent Toolkit (7)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `omniwire_snippet` | Reusable command templates with `{{var}}` substitution. |
+| `omniwire_alias` | In-session command shortcuts. |
+| `omniwire_trace` | Distributed tracing — span waterfalls across nodes. |
+| `omniwire_doctor` | Health diagnostics — SSH, disk, mem, docker, WireGuard, CyberBase. |
+| `omniwire_metrics` | Prometheus-compatible metrics scrape/export. |
+| `omniwire_audit` | Command audit log — view/search/stats. |
+| `omniwire_plugin` | Plugin system — list/load from `~/.omniwire/plugins/`. |
+
+</details>
+
+<details>
+<summary><b>CyberSync (9)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `cybersync_status` | Sync status, item counts, pending syncs. |
+| `cybersync_sync_now` | Trigger immediate reconciliation. |
+| `cybersync_diff` | Local vs database differences. |
+| `cybersync_history` | Sync event log. |
+| `cybersync_search_knowledge` | Full-text search unified knowledge base. |
+| `cybersync_get_memory` | Retrieve Claude memory from PostgreSQL. |
+| `cybersync_manifest` | Tracked files per tool. |
+| `cybersync_force_push` | Force push file to all nodes. |
+| `omniwire_secrets` | Secrets management (1Password, file, env). |
+
+</details>
 
 ---
 
