@@ -1,6 +1,6 @@
 {
   "name": "omniwire",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Infrastructure layer for AI agent swarms — 75+ MCP tools · A2A · VPN · firewall · CDP · cookies · CyberBase · background dispatch",
   "type": "module",
   "bin": {

@@ -214,25 +214,27 @@ let cbDraining = false;
 
 function cbInit(mgr: NodeManager) { cbManager = mgr; }
 
-/** Fire-and-forget write to CyberBase knowledge table. Never blocks, never throws. */
+/** psql helper — all DB calls have 5s statement_timeout to prevent hangs */
+const pgExec = (sql: string) => `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "SET statement_timeout='5s'; ${sql}" 2>/dev/null`;
+
+/** Fire-and-forget write to CyberBase. Never blocks, never throws. */
 function cb(category: string, key: string, value: string) {
   if (!cbManager) return;
   const valEsc = value.replace(/'/g, "''").slice(0, 50000);
   const keyEsc = `${category}:${key}`.replace(/'/g, "''");
-  // Upsert: delete old + insert new (no unique constraint on source_tool+key)
-  const sql = `DELETE FROM knowledge WHERE source_tool='omniwire' AND key='${keyEsc}'; INSERT INTO knowledge (source_tool, key, value, updated_at) VALUES ('omniwire', '${keyEsc}', jsonb_build_object('data', '${valEsc}'), NOW());`;
+  const sql = `INSERT INTO knowledge (source_tool, key, value, updated_at) VALUES ('omniwire', '${keyEsc}', jsonb_build_object('data', '${valEsc}'), NOW()) ON CONFLICT (source_tool, key) DO UPDATE SET value = jsonb_build_object('data', '${valEsc}'), updated_at = NOW();`;
   CB_QUEUE.push(sql);
   if (!cbDraining) drainCb();
 }
 
-/** Batch-drain CyberBase write queue (max 10 per flush) */
+/** Batch-drain CyberBase write queue (max 10 per flush, 5s timeout) */
 async function drainCb() {
   if (!cbManager || CB_QUEUE.length === 0) { cbDraining = false; return; }
   cbDraining = true;
   const batch = CB_QUEUE.splice(0, 10);
   const combined = batch.join(' ');
   try {
-    await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "${combined}" 2>/dev/null`);
+    await cbManager.exec('contabo', pgExec(combined));
   } catch { /* never fail */ }
   if (CB_QUEUE.length > 0) setTimeout(drainCb, 100);
   else cbDraining = false;
@@ -243,7 +245,7 @@ async function cbGet(category: string, key: string): Promise<string | null> {
   if (!cbManager) return null;
   const fullKey = `${category}:${key}`.replace(/'/g, "''");
   try {
-    const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SELECT value->>'data' FROM knowledge WHERE source_tool='omniwire' AND key='${fullKey}';" 2>/dev/null`);
+    const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';SELECT value->>'data' FROM knowledge WHERE source_tool='omniwire' AND key='${fullKey}';" 2>/dev/null`);
     const val = r.stdout.trim();
     return val || null;
   } catch { return null; }
@@ -254,7 +256,7 @@ async function cbList(category: string): Promise<string[]> {
   if (!cbManager) return [];
   const prefix = `${category}:`.replace(/'/g, "''");
   try {
-    const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SELECT replace(key, '${prefix}', '') FROM knowledge WHERE source_tool='omniwire' AND key LIKE '${prefix}%' ORDER BY updated_at DESC LIMIT 100;" 2>/dev/null`);
+    const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';SELECT replace(key, '${prefix}', '') FROM knowledge WHERE source_tool='omniwire' AND key LIKE '${prefix}%' ORDER BY updated_at DESC LIMIT 100;" 2>/dev/null`);
     return r.stdout.trim().split('\n').map(s => s.trim()).filter(Boolean);
   } catch { return []; }
 }
@@ -266,7 +268,7 @@ async function cbSearch(query: string, sourceFilter?: string): Promise<string> {
   const escaped = query.replace(/'/g, "''");
   try {
     const r = await cbManager.exec('contabo',
-      `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SELECT source_tool, key, substring(value::text,1,200) FROM knowledge WHERE (value::text ILIKE '%${escaped}%' OR key ILIKE '%${escaped}%') ${srcFilter} ORDER BY updated_at DESC LIMIT 20;" 2>/dev/null`
+      `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';SELECT source_tool, key, substring(value::text,1,200) FROM knowledge WHERE (value::text ILIKE '%${escaped}%' OR key ILIKE '%${escaped}%') ${srcFilter} ORDER BY updated_at DESC LIMIT 20;" 2>/dev/null`
     );
     return r.stdout.trim();
   } catch { return ''; }
@@ -279,7 +281,7 @@ async function cbSemanticSearch(query: string, limit: number = 10): Promise<stri
   try {
     // Try pgvector cosine similarity first
     const r = await cbManager.exec('contabo',
-      `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "
+      `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';
         SELECT source_tool, key, substring(value::text,1,300)
         FROM knowledge
         WHERE embedding IS NOT NULL
@@ -290,7 +292,7 @@ async function cbSemanticSearch(query: string, limit: number = 10): Promise<stri
     if (r.stdout.trim()) return r.stdout.trim();
     // Fallback: ILIKE full-text
     const r2 = await cbManager.exec('contabo',
-      `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "
+      `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';
         SELECT source_tool, key, substring(value::text,1,300)
         FROM knowledge
         WHERE value::text ILIKE '%${escaped}%' OR key ILIKE '%${escaped}%'
@@ -305,7 +307,7 @@ async function cbSemanticSearch(query: string, limit: number = 10): Promise<stri
 export function createOmniWireServer(manager: NodeManager, transfer: TransferEngine): McpServer {
   const server = new McpServer({
     name: 'omniwire',
-    version: '2.7.0',
+    version: '3.0.1',
   });
 
   // -- Auto-inject `background` param into every tool -------------------------
@@ -1862,7 +1864,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         const domainKey = domain ?? 'all';
         const pgEscaped = src.stdout.replace(/'/g, "''");
         const cyberbaseResult = await manager.exec('contabo',
-          `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "INSERT INTO sync_items (category, key, value, updated_at) VALUES ('cookies', '${domainKey}', '${pgEscaped}', NOW()) ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();" 2>/dev/null && echo "cyberbase: synced" || echo "cyberbase: skipped (no DB)"`
+          `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "SET statement_timeout='5s'; INSERT INTO sync_items (category, key, value, updated_at) VALUES ('cookies', '${domainKey}', '${pgEscaped}', NOW()) ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();" 2>/dev/null && echo "cyberbase: synced" || echo "cyberbase: skipped (no DB)"`
         );
 
         // 3. Sync to 1Password (if op CLI available)
@@ -1887,7 +1889,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       if (action === 'cyberbase-get') {
         const domainKey = domain ?? 'all';
         const r = await manager.exec('contabo',
-          `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SELECT value FROM sync_items WHERE category='cookies' AND key='${domainKey}';" 2>/dev/null`
+          `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';SELECT value FROM sync_items WHERE category='cookies' AND key='${domainKey}';" 2>/dev/null`
         );
         if (!r.stdout.trim()) return fail(`No cookies for '${domainKey}' in CyberBase`);
         return ok('contabo', r.durationMs, r.stdout.trim(), `cyberbase cookies: ${domainKey}`);
@@ -1897,7 +1899,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         const domainKey = domain ?? 'all';
         const pgEsc = cookieData.replace(/'/g, "''");
         const r = await manager.exec('contabo',
-          `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "INSERT INTO sync_items (category, key, value, updated_at) VALUES ('cookies', '${domainKey}', '${pgEsc}', NOW()) ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();" 2>/dev/null`
+          `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "SET statement_timeout='5s'; INSERT INTO sync_items (category, key, value, updated_at) VALUES ('cookies', '${domainKey}', '${pgEsc}', NOW()) ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();" 2>/dev/null`
         );
         return r.code === 0 ? okBrief(`Cookies stored in CyberBase: ${domainKey}`) : fail(r.stderr);
       }
