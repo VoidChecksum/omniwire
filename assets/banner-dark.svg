@@ -1,0 +1,82 @@
+<svg width="900" height="220" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0D1117"/>
+      <stop offset="40%" style="stop-color:#0D1B2A"/>
+      <stop offset="70%" style="stop-color:#162B44"/>
+      <stop offset="100%" style="stop-color:#1A3A5C"/>
+    </linearGradient>
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#59C2FF"/>
+      <stop offset="50%" style="stop-color:#7DD3FC"/>
+      <stop offset="100%" style="stop-color:#59C2FF"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softGlow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="220" fill="url(#bg)" rx="0"/>
+
+  <!-- Decorative dots/grid pattern -->
+  <g opacity="0.08" fill="#59C2FF">
+    <circle cx="50" cy="30" r="1.5"/>
+    <circle cx="100" cy="50" r="1"/>
+    <circle cx="150" cy="25" r="1.5"/>
+    <circle cx="200" cy="60" r="1"/>
+    <circle cx="250" cy="35" r="1.5"/>
+    <circle cx="700" cy="40" r="1.5"/>
+    <circle cx="750" cy="55" r="1"/>
+    <circle cx="800" cy="30" r="1.5"/>
+    <circle cx="850" cy="65" r="1"/>
+    <circle cx="120" cy="180" r="1"/>
+    <circle cx="780" cy="185" r="1.5"/>
+    <circle cx="400" cy="195" r="1"/>
+    <circle cx="550" cy="190" r="1.5"/>
+  </g>
+
+  <!-- Accent line -->
+  <line x1="300" y1="105" x2="600" y2="105" stroke="#59C2FF" stroke-width="1" opacity="0.15"/>
+
+  <!-- Main title -->
+  <text x="450" y="80" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="72" font-weight="700" fill="url(#textGrad)" text-anchor="middle" filter="url(#glow)">OmniWire</text>
+
+  <!-- Lightning bolt accent -->
+  <text x="248" y="78" font-size="40" fill="#59C2FF" opacity="0.6" filter="url(#softGlow)">&#x26A1;</text>
+
+  <!-- Tagline -->
+  <text x="450" y="130" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="20" font-weight="400" fill="#8B949E" text-anchor="middle">The infrastructure layer for AI agent swarms</text>
+
+  <!-- Stats bar -->
+  <g font-family="'Segoe UI Mono', 'SF Mono', monospace" font-size="13" fill="#59C2FF" opacity="0.7">
+    <text x="175" y="175" text-anchor="middle">54 MCP Tools</text>
+    <text x="325" y="175" text-anchor="middle">A2A Protocol</text>
+    <text x="450" y="175" text-anchor="middle">~80ms Latency</text>
+    <text x="575" y="175" text-anchor="middle">LZ4 Transfer</text>
+    <text x="725" y="175" text-anchor="middle">AES-128-GCM</text>
+  </g>
+
+  <!-- Separator dots between stats -->
+  <g fill="#59C2FF" opacity="0.3">
+    <circle cx="250" cy="172" r="2"/>
+    <circle cx="387" cy="172" r="2"/>
+    <circle cx="513" cy="172" r="2"/>
+    <circle cx="650" cy="172" r="2"/>
+  </g>
+
+  <!-- Bottom wave -->
+  <path d="M0,200 Q150,185 300,200 Q450,215 600,200 Q750,185 900,200 L900,220 L0,220 Z" fill="#59C2FF" opacity="0.08"/>
+  <path d="M0,205 Q200,190 400,205 Q600,220 900,205 L900,220 L0,220 Z" fill="#59C2FF" opacity="0.05"/>
+</svg>

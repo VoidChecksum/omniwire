@@ -1,48 +1,19 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:0D1117,25:0D1B2A,50:162B44,75:1A3A5C,100:59C2FF&height=200&section=header&text=⚡%20OmniWire&fontSize=72&fontColor=59C2FF&animation=twinkling&fontAlignY=35&desc=Infrastructure%20Layer%20for%20AI%20Agent%20Swarms&descSize=18&descColor=8B949E&descAlignY=60" />
-    <source media="(prefers-color-scheme: light)" srcset="https://capsule-render.vercel.app/api?type=waving&color=0:FFFFFF,25:F0F4F8,50:D8E2EE,75:B8CCE0,100:59C2FF&height=200&section=header&text=⚡%20OmniWire&fontSize=72&fontColor=0D1117&animation=twinkling&fontAlignY=35&desc=Infrastructure%20Layer%20for%20AI%20Agent%20Swarms&descSize=18&descColor=586069&descAlignY=60" />
-    <img alt="OmniWire" src="https://capsule-render.vercel.app/api?type=waving&color=0:0D1117,25:0D1B2A,50:162B44,75:1A3A5C,100:59C2FF&height=200&section=header&text=⚡%20OmniWire&fontSize=72&fontColor=59C2FF&animation=twinkling&fontAlignY=35&desc=Infrastructure%20Layer%20for%20AI%20Agent%20Swarms&descSize=18&descColor=8B949E&descAlignY=60" />
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="assets/banner-light.svg" />
+    <img alt="OmniWire — The infrastructure layer for AI agent swarms" src="assets/banner-dark.svg" width="900" />
   </picture>
 </p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0D1117" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP_Tools-54-59C2FF?style=for-the-badge&logo=lightning&logoColor=59C2FF&labelColor=0D1117" alt="tools" />
-  <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&logo=link&logoColor=00C853&labelColor=0D1117" alt="A2A" />
-  <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&logo=bolt&logoColor=FF6D00&labelColor=0D1117" alt="latency" />
-  <img src="https://img.shields.io/badge/LZ4-Transfer-CC93E6?style=for-the-badge&logo=files&logoColor=CC93E6&labelColor=0D1117" alt="lz4" />
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-8B949E?style=for-the-badge&logo=gnu&logoColor=8B949E&labelColor=0D1117" alt="license" /></a>
+  <img src="https://img.shields.io/badge/MCP_Tools-54-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
+  <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&labelColor=0D1117" alt="A2A" />
+  <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
+  <img src="https://img.shields.io/badge/Background-Dispatch-CC93E6?style=for-the-badge&labelColor=0D1117" alt="background" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/GPL--3.0-license-8B949E?style=for-the-badge&labelColor=0D1117" alt="license" /></a>
 </p>
-
-<br/>
-
-<div align="center">
-
-**54 MCP tools** · **Agent-to-Agent messaging** · **Distributed task queues** · **Capability routing**
-
-AES-128-GCM SSH2 · LZ4 transfers · Circuit breakers · Multi-path failover · Pipeline DAGs · Blackboard architecture
-
-</div>
-
-<br/>
-
-<div align="center">
-<table>
-<tr>
-<td align="center">⚡ <b>~80ms</b><br/><sub>exec latency</sub></td>
-<td align="center">🔧 <b>54</b><br/><sub>MCP tools</sub></td>
-<td align="center">🔗 <b>A2A</b><br/><sub>agent protocol</sub></td>
-<td align="center">📦 <b>LZ4</b><br/><sub>fast transfer</sub></td>
-<td align="center">🛡️ <b>AES-128</b><br/><sub>GCM cipher</sub></td>
-<td align="center">🔄 <b>300ms</b><br/><sub>reconnect</sub></td>
-</tr>
-</table>
-</div>
-
-> **v2.5** &mdash; AES-128-GCM cipher, 2s keepalive, LZ4 compression, SFTP-first reads, agent registry, blackboard, task queues, capability routing. [Changelog →](#changelog)
-
-<br/>
 
 ---
 
@@ -72,9 +43,9 @@ Add to your AI agent (Claude Code, Cursor, OpenCode, etc.):
 | Agents can't coordinate with each other | A2A messaging, events, semaphores |
 | Multi-step deploys need many round-trips | Pipelines chain steps in 1 call |
 | Flaky commands break agent loops | Built-in retry + assert + watch |
-| Long tasks block the agent | Background dispatch with task IDs |
+| Long tasks block the agent | `background: true` on any tool |
 | Results lost between tool calls | Session store with `{{key}}` interpolation |
-| Different transfer methods for diff sizes | Auto-selects SFTP / netcat / aria2c |
+| Different transfer methods for diff sizes | Auto-selects SFTP / netcat+LZ4 / aria2c |
 | SSH connections drop | Multi-path failover + circuit breaker |
 
 ---
@@ -96,7 +67,7 @@ graph TB
 
         subgraph tools["54 Tools"]
             direction LR
-            EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline"]
+            EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline  bg"]
             AGENT["Agentic<br/>store  watch  task<br/>a2a  events  locks"]
             FILES["Files & Deploy<br/>read  write  transfer<br/>deploy  find"]
             SYS["System & DevOps<br/>docker  services<br/>cron  env  git  syslog"]
@@ -106,7 +77,7 @@ graph TB
         subgraph engine["Core Engine"]
             direction LR
             POOL["SSH2 Pool<br/>persistent  compressed<br/>circuit breaker"]
-            XFER["Transfer Engine<br/>SFTP  netcat+gzip<br/>aria2c 16-conn"]
+            XFER["Transfer Engine<br/>SFTP  netcat+LZ4<br/>aria2c 16-conn"]
             CSYNC["Sync Engine<br/>PostgreSQL  XChaCha20<br/>parallel reconcile"]
         end
     end
@@ -152,6 +123,7 @@ omniwire_run        multi-line script (compact UI)
 omniwire_batch      N commands, 1 tool call, chaining
 omniwire_broadcast  parallel across all nodes
 omniwire_pipeline   multi-step DAG with data flow
+omniwire_bg         poll/list background tasks
 ```
 
 </td>
@@ -175,7 +147,7 @@ omniwire_workflow     reusable named DAGs
 ### Adaptive File Transfer
 ```
  < 10 MB   SFTP         native, 80ms
- 10M-1GB   netcat+gzip  compressed, 100ms
+ 10M-1GB   netcat+LZ4   compressed, 100ms
  > 1 GB    aria2c       16-parallel, max speed
 ```
 
@@ -189,14 +161,26 @@ Connected --> Health Ping (30s, parallel)
 Failure --> Multi-path Failover
     |         WireGuard -> Tailscale -> Public IP
     |
-    +--> Retry (500ms -> 1s -> ... -> 15s)
+    +--> Retry (300ms -> 600ms -> ... -> 10s)
     |
-3 fails --> Circuit OPEN (20s) -> Auto-recover
+3 fails --> Circuit OPEN (15s) -> Auto-recover
 ```
 
 </td>
 </tr>
 <tr>
+<td>
+
+### Background Dispatch
+```
+# Any tool supports background: true
+exec(background=true)   -> "bg-abc123"
+bg(action="poll", id=..) -> "RUNNING (3.2s)"
+bg(action="result", id=..) -> full output
+bg(action="list")       -> all tasks + status
+```
+
+</td>
 <td>
 
 ### Agentic Chaining
@@ -210,21 +194,6 @@ watch(assert="ready")       poll until
 ```
 
 </td>
-<td>
-
-### CyberSync + CyberBase
-```
-Nodes --push--> PostgreSQL (cyberbase)
-  |                  |
-  |             XChaCha20-Poly1305
-  |             encrypted at rest
-  |
-  +--mirror--> Obsidian Vault
-                    |
-               Obsidian Sync (cloud)
-```
-
-</td>
 </tr>
 </table>
 
@@ -232,7 +201,7 @@ Nodes --push--> PostgreSQL (cyberbase)
 
 ## All 54 Tools
 
-> **Every tool** supports `background: true` — returns a task ID immediately. Poll with `omniwire_bg`.
+> **Every tool** supports `background: true` -- returns a task ID immediately. Poll with `omniwire_bg`.
 
 ### Execution (6)
 
@@ -327,30 +296,33 @@ Nodes --push--> PostgreSQL (cyberbase)
 
 ## Performance
 
-| Operation | Latency | v2.5 Optimization |
-|-----------|---------|-------------------|
-| **Command exec** | **~80ms** | AES-128-GCM cipher, persistent SSH2 channel, zero-fork `:` ping |
-| **Mesh status** | **~100ms** | Parallel probes, 5s cache, single `/proc` read (no pipes) |
-| **File read (<1MB)** | **~60ms** | SFTP-first path (skips `cat` shell fork) |
-| **Transfer (10MB)** | **~120ms** | LZ4 compression (10x faster than gzip), 50ms bind delay |
-| **Transfer (1GB)** | **~8s** | aria2c 16-connection parallel, 150ms server startup |
+| Operation | Latency | Optimization |
+|-----------|---------|-------------|
+| **Command exec** | **~80ms** | AES-128-GCM cipher, persistent SSH2, zero-fork `:` ping |
+| **Mesh status** | **~100ms** | Parallel probes, 5s cache, single `/proc` read |
+| **File read (<1MB)** | **~60ms** | SFTP-first (skips `cat` fork) |
+| **Transfer (10MB)** | **~120ms** | LZ4 compression (10x faster than gzip) |
+| **Transfer (1GB)** | **~8s** | aria2c 16-connection parallel |
 | **Pipeline (5 steps)** | **~400ms** | `{{prev}}` interpolation, no extra tool calls |
-| **Health check (all)** | **~90ms** | Parallel Promise.allSettled, structured JSON |
+| **Health check (all)** | **~90ms** | Parallel Promise.allSettled |
 | **A2A message** | **~85ms** | File-append queue, atomic dequeue |
-| **Config push** | **~150ms** | Parallel deploy + Obsidian mirror |
-| **Reconnect** | **~300ms** | 300ms initial delay (was 500ms), 2s keepalive detection |
+| **Reconnect** | **~300ms** | 300ms initial, 2s keepalive, 15s circuit breaker |
 
-**Optimizations in v2.5:**
-- **Cipher**: AES-128-GCM (AES-NI accelerated) preferred over default negotiation
-- **Key exchange**: curve25519-sha256 preferred (fastest modern KEX)
-- **Keepalive**: 2s interval, 2 retries = 4s dead detection (was 6s)
-- **Port finder**: `shuf` (pure bash) replaces `python3 -c socket` (saves ~30ms per transfer)
-- **Compression**: LZ4-1 for transfers (10x faster than gzip, ~same ratio for mixed data)
-- **Buffer**: Array push + join replaces string concatenation (O(n) vs O(n^2) for large outputs)
+<details>
+<summary><b>Optimization details</b></summary>
+
+- **Cipher**: AES-128-GCM (AES-NI hardware accelerated)
+- **Key exchange**: curve25519-sha256 (fastest modern KEX)
+- **Keepalive**: 2s interval, 2 retries = 4s dead detection
+- **Port finder**: `shuf` (pure bash) replaces `python3 -c socket` (-30ms)
+- **Compression**: LZ4-1 for transfers (10x faster than gzip)
+- **Buffer**: Array push + join (O(n) vs O(n^2) string concat)
 - **Status**: Single `/proc` read replaces multiple piped commands
-- **Health ping**: `:` builtin replaces `true` (no hash lookup, no fork)
-- **Reads**: SFTP subsystem tried first, falls back to `cat` only on failure
-- **Circuit breaker**: 15s recovery (was 20s), 10s reconnect cap (was 15s)
+- **Health ping**: `:` builtin (no hash lookup, no fork)
+- **Reads**: SFTP tried first, `cat` fallback only on failure
+- **Circuit breaker**: 15s recovery, 10s reconnect cap
+
+</details>
 
 ---
 
@@ -362,7 +334,7 @@ Nodes --push--> PostgreSQL (cyberbase)
 - XChaCha20-Poly1305 at-rest encryption for synced configs
 - 2MB output guard prevents memory exhaustion
 - 4KB auto-truncation prevents context window bloat
-- Circuit breaker with 20s auto-recovery isolates failing nodes
+- Circuit breaker isolates failing nodes
 - CORS restricted to localhost on REST API
 
 ---
@@ -402,51 +374,43 @@ Create `~/.omniwire/mesh.json`:
 ## Changelog
 
 <details>
+<summary><b>v2.5.1 -- Universal Background Dispatch</b></summary>
+
+**`background: true`** auto-injected into all 54 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
+
+</details>
+
+<details>
 <summary><b>v2.5.0 -- Performance Overhaul, A2A Protocol Expansion</b></summary>
 
 **Performance**: AES-128-GCM cipher, curve25519-sha256 KEX, 2s keepalive, LZ4 transfers (10x faster), `shuf` port finder (-30ms), SFTP-first reads, array buffer concat, `/proc` single-read status, `:` builtin health ping, 300ms reconnect start, 15s circuit breaker.
 
 **4 new A2A tools** (49 -> 53): agent_registry (capability discovery), blackboard (swarm collaboration), task_queue (distributed work), capability (node routing).
 
-**Connectivity**: Always-on 2s keepalive with 4s dead detection. 5s connect timeout. 10s reconnect cap. 15s circuit recovery.
-
 </details>
 
 <details>
 <summary><b>v2.4.0 -- Agentic Loop, A2A, Multi-Agent Orchestration</b></summary>
 
-**9 new agentic tools** (40 -> 49): store, pipeline, watch, healthcheck, agent_task, a2a_message, semaphore, event, workflow
-
-**Agentic upgrades to existing tools**: `format:"json"`, `retry`, `assert`, `store_as`, `{{key}}` interpolation on exec/broadcast/batch
-
-**Dynamic response processing**: Structured JSON output, step-to-step data flow, session result store, abort-on-fail chains
+9 new agentic tools (40 -> 49): store, pipeline, watch, healthcheck, agent_task, a2a_message, semaphore, event, workflow. Agentic upgrades: `format:"json"`, `retry`, `assert`, `store_as`, `{{key}}` interpolation.
 
 </details>
 
 <details>
 <summary><b>v2.3.0 -- Compact Output, Speed, New Tools</b></summary>
 
-Output overhaul (auto-truncation, smart time, tabular multi-node). Performance (parallel health pings, 3s keepalive, 20s circuit breaker, 6s connect timeout). 6 new DevOps tools (cron, env, network, clipboard, git, syslog).
+Output overhaul (auto-truncation, smart time, tabular multi-node). 6 new DevOps tools (cron, env, network, clipboard, git, syslog).
 
 </details>
 
 <details>
-<summary><b>v2.2.1 -- Security & Bug Fixes</b></summary>
+<summary><b>v2.2.1 -- v2.1.0</b></summary>
 
-Fixed script-only exec, shell race condition, transfer size guard, CORS restriction, input validation.
-
-</details>
-
-<details>
-<summary><b>v2.1.0 -- Multi-Path Failover & Performance</b></summary>
-
-Multi-path SSH (WireGuard/Tailscale/Public), SSH key caching, CyberBase integration, VaultBridge Obsidian mirror.
+Security fixes, multi-path SSH failover, CyberBase integration, VaultBridge Obsidian mirror.
 
 </details>
 
 ---
-
-## Architecture
 
 ```
 omniwire/
@@ -459,12 +423,7 @@ omniwire/
     ui/            Terminal formatting
 ```
 
-## Requirements
-
-- **Node.js** >= 20
-- **SSH access** to remote nodes (key-based auth)
-- **PostgreSQL** (only for CyberSync)
-- **WireGuard + Tailscale** recommended (multi-path failover)
+**Requirements:** Node.js >= 20 &bull; SSH key access to nodes &bull; PostgreSQL (CyberSync only) &bull; WireGuard recommended
 
 ---
 
