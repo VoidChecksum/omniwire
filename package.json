@@ -1,7 +1,7 @@
 {
   "name": "omniwire",
-  "version": "2.5.0",
-  "description": "OmniWire Terminal \u00e2\u20ac\u201d unified mesh control layer with MCP server (30 tools) + CyberSync daemon",
+  "version": "2.5.1",
+  "description": "Infrastructure layer for AI agent swarms — 54 MCP tools · A2A protocol · background dispatch · ~80ms latency · LZ4 transfers",
   "type": "module",
   "bin": {
     "omniwire": "./dist/index.js",

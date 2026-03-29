@@ -80,17 +80,85 @@ function multiResultJson(results: { nodeId: string; code: number; stdout: string
 
 // -- Agentic state -- shared across tool calls in the same MCP session --------
 const resultStore = new Map<string, string>();  // key -> value store for chaining
+
+// -- Background task registry -- dispatch-and-poll for any tool ---------------
+interface BgTask { id: string; node: string; label: string; startedAt: number; promise: Promise<McpResult>; result?: McpResult }
+const bgTasks = new Map<string, BgTask>();
+
+function bgId(): string { return `bg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`; }
+
+function dispatchBg(node: string, label: string, fn: () => Promise<McpResult>): McpResult {
+  const id = bgId();
+  const task: BgTask = { id, node, label, startedAt: Date.now(), promise: fn() };
+  task.promise.then((r) => { task.result = r; });
+  bgTasks.set(id, task);
+  return okBrief(`BACKGROUND ${id} dispatched on ${node}: ${label}`);
+}
 // -----------------------------------------------------------------------------
 
 export function createOmniWireServer(manager: NodeManager, transfer: TransferEngine): McpServer {
   const server = new McpServer({
     name: 'omniwire',
-    version: '2.5.0',
+    version: '2.5.1',
   });
+
+  // -- Auto-inject `background` param into every tool -------------------------
+  const origTool = server.tool.bind(server);
+  (server as any).tool = (name: string, desc: string, schema: Record<string, any>, handler: (args: any) => Promise<McpResult>) => {
+    // Skip bg meta-tool itself
+    if (name === 'omniwire_bg') return origTool(name, desc, schema, handler);
+    const augSchema = { ...schema, background: z.boolean().optional().describe('Run in background. Returns task ID immediately — poll with omniwire_bg.') };
+    const wrappedHandler = async (args: any) => {
+      if (args.background) {
+        const lbl = args.label ?? args.command?.slice(0, 60) ?? name;
+        const nd = args.node ?? args.src_node ?? 'omniwire';
+        return dispatchBg(nd, lbl, () => handler(args));
+      }
+      return handler(args);
+    };
+    return origTool(name, desc, augSchema, wrappedHandler);
+  };
+  // ---------------------------------------------------------------------------
 
   const shells = new ShellManager(manager);
   const realtime = new RealtimeChannel(manager);
   const tunnels = new TunnelManager(manager);
+
+  // --- Tool 0: omniwire_bg (background task manager) ---
+  origTool(
+    'omniwire_bg',
+    'Poll, list, or retrieve results from background tasks dispatched with background=true on any tool.',
+    {
+      action: z.enum(['list', 'poll', 'result']).describe('list=show all tasks, poll=check if done, result=get output'),
+      task_id: z.string().optional().describe('Task ID (required for poll/result)'),
+    },
+    async ({ action, task_id }: { action: string; task_id?: string }) => {
+      if (action === 'list') {
+        if (bgTasks.size === 0) return okBrief('No background tasks.');
+        const lines = [...bgTasks.values()].map((bg) => {
+          const status = bg.result ? 'DONE' : 'RUNNING';
+          const elapsed = Date.now() - bg.startedAt;
+          return `${bg.id}  ${status}  ${bg.node}  ${t(elapsed)}  ${bg.label}`;
+        });
+        return okBrief(lines.join('\n'));
+      }
+      if (!task_id) return fail('task_id required for poll/result');
+      const task = bgTasks.get(task_id);
+      if (!task) return fail(`task ${task_id} not found`);
+
+      if (action === 'poll') {
+        const status = task.result ? 'DONE' : 'RUNNING';
+        const elapsed = Date.now() - task.startedAt;
+        return okBrief(`${task_id} ${status} (${t(elapsed)}) ${task.label}`);
+      }
+
+      if (action === 'result') {
+        if (!task.result) return okBrief(`${task_id} still RUNNING (${t(Date.now() - task.startedAt)})`);
+        return task.result;
+      }
+      return fail('invalid action');
+    }
+  );
 
   // --- Tool 1: omniwire_exec ---
   server.tool(
@@ -116,7 +184,6 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       const maxRetries = retry ?? 0;
       const useJson = format === 'json';
 
-      // Interpolate stored results: {{key}} -> value
       let resolvedCmd = command;
       if (resolvedCmd) {
         resolvedCmd = resolvedCmd.replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
@@ -132,19 +199,16 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
           : resolvedCmd!;
       }
 
-      // Execute with retry
       let result = await manager.exec(nodeId, effectiveCmd);
       for (let attempt = 0; attempt < maxRetries && result.code !== 0; attempt++) {
         await new Promise((r) => setTimeout(r, 1000));
         result = await manager.exec(nodeId, effectiveCmd);
       }
 
-      // Store result if requested
       if (store_as && result.code === 0) {
         resultStore.set(store_as, result.stdout.trim());
       }
 
-      // Assert pattern in output
       if (assertPattern && result.code === 0) {
         const regex = new RegExp(assertPattern);
         if (!regex.test(result.stdout)) {

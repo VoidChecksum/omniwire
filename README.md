@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0D1117" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP_Tools-53-59C2FF?style=for-the-badge&logo=lightning&logoColor=59C2FF&labelColor=0D1117" alt="tools" />
+  <img src="https://img.shields.io/badge/MCP_Tools-54-59C2FF?style=for-the-badge&logo=lightning&logoColor=59C2FF&labelColor=0D1117" alt="tools" />
   <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&logo=link&logoColor=00C853&labelColor=0D1117" alt="A2A" />
   <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&logo=bolt&logoColor=FF6D00&labelColor=0D1117" alt="latency" />
   <img src="https://img.shields.io/badge/LZ4-Transfer-CC93E6?style=for-the-badge&logo=files&logoColor=CC93E6&labelColor=0D1117" alt="lz4" />
@@ -19,7 +19,7 @@
 
 <div align="center">
 
-**53 MCP tools** · **Agent-to-Agent messaging** · **Distributed task queues** · **Capability routing**
+**54 MCP tools** · **Agent-to-Agent messaging** · **Distributed task queues** · **Capability routing**
 
 AES-128-GCM SSH2 · LZ4 transfers · Circuit breakers · Multi-path failover · Pipeline DAGs · Blackboard architecture
 
@@ -31,7 +31,7 @@ AES-128-GCM SSH2 · LZ4 transfers · Circuit breakers · Multi-path failover · 
 <table>
 <tr>
 <td align="center">⚡ <b>~80ms</b><br/><sub>exec latency</sub></td>
-<td align="center">🔧 <b>53</b><br/><sub>MCP tools</sub></td>
+<td align="center">🔧 <b>54</b><br/><sub>MCP tools</sub></td>
 <td align="center">🔗 <b>A2A</b><br/><sub>agent protocol</sub></td>
 <td align="center">📦 <b>LZ4</b><br/><sub>fast transfer</sub></td>
 <td align="center">🛡️ <b>AES-128</b><br/><sub>GCM cipher</sub></td>
@@ -94,7 +94,7 @@ graph TB
         direction TB
         MCP["MCP Protocol Layer<br/>stdio | SSE | REST"]
 
-        subgraph tools["53 Tools"]
+        subgraph tools["54 Tools"]
             direction LR
             EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline"]
             AGENT["Agentic<br/>store  watch  task<br/>a2a  events  locks"]
@@ -230,9 +230,11 @@ Nodes --push--> PostgreSQL (cyberbase)
 
 ---
 
-## All 53 Tools
+## All 54 Tools
 
-### Execution (5)
+> **Every tool** supports `background: true` — returns a task ID immediately. Poll with `omniwire_bg`.
+
+### Execution (6)
 
 | Tool | Description |
 |------|-------------|
@@ -241,6 +243,7 @@ Nodes --push--> PostgreSQL (cyberbase)
 | `omniwire_batch` | N commands in 1 call. Chaining with `{{prev}}`, `abort_on_fail`, parallel or sequential. |
 | `omniwire_broadcast` | Execute on all nodes simultaneously. JSON format support. |
 | `omniwire_pipeline` | Multi-step DAG. `{{prev}}`/`{{stepN}}` interpolation, per-step error handling, cross-node. |
+| `omniwire_bg` | List, poll, or retrieve results from background tasks. |
 
 ### Agentic / A2A (13)
 
@@ -448,7 +451,7 @@ Multi-path SSH (WireGuard/Tailscale/Public), SSH key caching, CyberBase integrat
 ```
 omniwire/
   src/
-    mcp/           MCP server (53 tools, 3 transports)
+    mcp/           MCP server (54 tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
     sync/          CyberSync + CyberBase (PostgreSQL, Obsidian, encryption)
     protocol/      Mesh config, types, path parsing
