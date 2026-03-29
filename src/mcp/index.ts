@@ -20,9 +20,18 @@ import type { SyncConfig } from '../sync/types.js';
 
 const args = process.argv.slice(2);
 const useStdio = args.includes('--stdio');
+const useJson = args.includes('--json');
 const ssePort = parseInt(args.find((a) => a.startsWith('--sse-port='))?.split('=')[1] ?? '3200');
 const restPort = parseInt(args.find((a) => a.startsWith('--rest-port='))?.split('=')[1] ?? '3201');
 const noSync = args.includes('--no-sync');
+
+function log(msg: string, data?: Record<string, unknown>): void {
+  if (useJson) {
+    process.stderr.write(JSON.stringify({ msg, ...data }) + '\n');
+  } else {
+    process.stderr.write(msg + '\n');
+  }
+}
 
 function detectNodeId(): string {
   if (process.platform === 'win32') return 'windows';
@@ -55,9 +64,9 @@ async function main(): Promise<void> {
       const engine = new SyncEngine(syncDb, config, manager, transfer);
 
       registerSyncTools(server, syncDb, engine, manifests, nodeId, manager, transfer);
-      process.stderr.write(`CyberSync: 12 tools registered (node=${nodeId})\n`);
+      log('CyberSync: 12 tools registered', { tools: 12, node: nodeId });
     } catch (err) {
-      process.stderr.write(`CyberSync init failed (continuing without sync): ${(err as Error).message}\n`);
+      log(`CyberSync init failed (continuing without sync): ${(err as Error).message}`, { error: (err as Error).message });
     }
   }
 
@@ -67,7 +76,7 @@ async function main(): Promise<void> {
   } else {
     startSSEServer(server, ssePort);
     startRESTServer(manager, transfer, restPort);
-    process.stderr.write(`OmniWire MCP: SSE on :${ssePort}, REST on :${restPort}\n`);
+    log(`OmniWire MCP: SSE on :${ssePort}, REST on :${restPort}`, { ssePort, restPort });
   }
 
   process.on('SIGINT', async () => {
@@ -78,6 +87,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  process.stderr.write(`Fatal: ${err.message}\n`);
+  log(`Fatal: ${(err as Error).message}`, { fatal: true, error: (err as Error).message });
   process.exit(1);
 });

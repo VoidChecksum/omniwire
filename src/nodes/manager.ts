@@ -15,6 +15,15 @@ interface NodeConnection {
   reconnecting: boolean;
   failures: number;
   circuitOpenUntil: number;
+  totalExecs: number;
+}
+
+// Priority queue entry for deferred command execution (priority 1-2)
+interface QueuedCommand {
+  nodeId: string;
+  command: string;
+  priority: number; // 0=highest (health/immediate), 1=normal, 2=low (batch)
+  resolve: (result: ExecResult) => void;
 }
 
 type ReconnectCallback = (nodeId: string) => void;
@@ -25,6 +34,8 @@ const HEALTH_PING_INTERVAL = 30_000;
 const CIRCUIT_OPEN_DURATION = 15_000;      // 15s circuit breaker — faster recovery
 const CIRCUIT_FAILURE_THRESHOLD = 3;
 const CONNECT_TIMEOUT = 5000;              // 5s connection timeout
+const QUEUE_CONCURRENCY = 10;              // max concurrent execs per node through queue
+const LATENCY_HISTORY_SIZE = 20;           // rolling window for avg latency
 
 // Prefer fast ciphers + key exchange for lowest latency
 const PREFERRED_CIPHERS = [
@@ -46,6 +57,13 @@ export class NodeManager {
   private statusCache: Map<string, { status: NodeStatus; at: number }> = new Map();
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private keyCache: Map<string, Buffer> = new Map();
+
+  // Per-node rolling latency history (capped at LATENCY_HISTORY_SIZE entries)
+  private latencyHistory: Map<string, number[]> = new Map();
+
+  // Per-node command queue and active-exec counter for priority 1-2 commands
+  private commandQueues: Map<string, QueuedCommand[]> = new Map();
+  private activeExecs: Map<string, number> = new Map();
 
   private getKey(path: string): Buffer {
     let key = this.keyCache.get(path);
@@ -83,6 +101,7 @@ export class NodeManager {
     const conn: NodeConnection = existing ?? {
       node, client, connected: false, activeHost: null,
       lastPing: null, reconnecting: false, failures: 0, circuitOpenUntil: 0,
+      totalExecs: 0,
     };
     conn.client = client;
     this.connections.set(node.id, conn);
@@ -149,6 +168,8 @@ export class NodeManager {
         conn.circuitOpenUntil = 0;
         this.reconnectDelays.set(node.id, 300);
         for (const cb of this.reconnectCallbacks) cb(node.id);
+        // Drain any queued commands that accumulated while offline
+        this.drainQueue(node.id);
       } catch {
         conn.reconnecting = false;
         this.reconnectDelays.set(node.id, Math.min(currentDelay * 2, 10_000)); // 10s cap
@@ -184,7 +205,72 @@ export class NodeManager {
     return online;
   }
 
-  // Remote execution via SSH2 client.exec() -- NOT child_process.exec()
+  // ── Smart truncation ────────────────────────────────────────────────────────
+  //
+  // Detects output format and truncates intelligently so large results stay
+  // readable without blowing up context or transport buffers.
+  //
+  static smartTruncate(output: string, maxChars: number = 4000): string {
+    if (output.length <= maxChars) return output;
+
+    // JSON detection — try to parse; keep first 3000 chars + item count note
+    const trimmed = output.trimStart();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(output);
+        const isArray = Array.isArray(parsed);
+        const count = isArray ? parsed.length : Object.keys(parsed).length;
+        const pretty = JSON.stringify(parsed, null, 2);
+        if (pretty.length > maxChars) {
+          const unit = isArray ? 'items' : 'keys';
+          return pretty.slice(0, 3000) + `\n... (${count} total ${unit}, truncated)`;
+        }
+        return pretty;
+      } catch {
+        // not valid JSON — fall through
+      }
+    }
+
+    const lines = output.split('\n');
+
+    // Table detection — consistent column pattern (pipes or aligned spaces)
+    // Heuristic: ≥3 lines and first two non-empty lines have the same number
+    // of delimiter-separated columns
+    const nonEmpty = lines.filter((l) => l.trim().length > 0);
+    if (nonEmpty.length >= 3) {
+      const hasPipes = nonEmpty[0].includes('|') && nonEmpty[1].includes('|');
+      if (hasPipes) {
+        const colCount = (s: string) => s.split('|').length;
+        if (colCount(nonEmpty[0]) === colCount(nonEmpty[1])) {
+          const MAX_ROWS = 30;
+          const header = lines.slice(0, 2); // header + separator
+          const dataRows = lines.slice(2);
+          if (dataRows.length > MAX_ROWS) {
+            const kept = dataRows.slice(0, MAX_ROWS);
+            return [...header, ...kept, `... (${dataRows.length - MAX_ROWS} more rows)`].join('\n');
+          }
+        }
+      }
+    }
+
+    // Log detection — lines that start with a timestamp or log-level token
+    const LOG_RE = /^(\d{4}-\d{2}-\d{2}|\[\d|\d{2}:\d{2}:\d{2}|INFO|WARN|ERROR|DEBUG|TRACE|\[INFO\]|\[WARN\]|\[ERR)/;
+    const logLineCount = nonEmpty.slice(0, 10).filter((l) => LOG_RE.test(l)).length;
+    if (logLineCount >= 3) {
+      const TAIL = 50;
+      if (lines.length > TAIL) {
+        const skipped = lines.length - TAIL;
+        return `... (${skipped} earlier lines omitted)\n` + lines.slice(-TAIL).join('\n');
+      }
+    }
+
+    // Default — keep first maxChars characters
+    return output.slice(0, maxChars) + `\n... (${output.length - maxChars} more chars)`;
+  }
+
+  // ── Core exec (non-blocking — ssh2 supports multiple concurrent exec channels
+  //    on a single connection natively; each call opens a separate channel and
+  //    returns immediately, so concurrent calls do NOT serialize) ────────────
   async exec(nodeId: string, command: string): Promise<ExecResult> {
     const start = Date.now();
 
@@ -201,6 +287,8 @@ export class NodeManager {
     if (!conn?.connected) {
       return { nodeId, stdout: '', stderr: `Node ${nodeId} is offline`, code: -1, durationMs: Date.now() - start };
     }
+
+    conn.totalExecs++;
 
     return new Promise<ExecResult>((resolve) => {
       const chunks: string[] = [];    // array join is faster than string concat
@@ -240,11 +328,145 @@ export class NodeManager {
         stream.on('close', (code: number) => {
           conn.lastPing = new Date();
           conn.failures = 0;
+          const latency = Date.now() - start;
+          this.recordLatency(nodeId, latency);
           const stdout = chunks.join('').trimEnd() + (truncated ? '\n[truncated at 2MB]' : '');
-          resolve({ nodeId, stdout, stderr: errChunks.join('').trimEnd(), code: code ?? 0, durationMs: Date.now() - start });
+          resolve({ nodeId, stdout, stderr: errChunks.join('').trimEnd(), code: code ?? 0, durationMs: latency });
         });
       });
     });
+  }
+
+  // ── Priority exec ───────────────────────────────────────────────────────────
+  //
+  // Priority 0: executes immediately (same as exec — used for health checks and
+  //             urgent commands; bypasses the queue entirely).
+  // Priority 1: normal — goes through the per-node queue with QUEUE_CONCURRENCY
+  //             concurrency limit.
+  // Priority 2: low / batch — same queue, sorted behind priority-1 entries.
+  //
+  async execPriority(nodeId: string, command: string, priority: number): Promise<ExecResult> {
+    if (priority === 0) {
+      return this.exec(nodeId, command);
+    }
+
+    return new Promise<ExecResult>((resolve) => {
+      const entry: QueuedCommand = { nodeId, command, priority, resolve };
+
+      if (!this.commandQueues.has(nodeId)) {
+        this.commandQueues.set(nodeId, []);
+      }
+
+      const queue = this.commandQueues.get(nodeId)!;
+      // Insert in priority order (lower number = higher priority = earlier in array)
+      let insertAt = queue.length;
+      for (let i = 0; i < queue.length; i++) {
+        if (queue[i].priority > priority) {
+          insertAt = i;
+          break;
+        }
+      }
+      queue.splice(insertAt, 0, entry);
+
+      this.drainQueue(nodeId);
+    });
+  }
+
+  // Drain up to QUEUE_CONCURRENCY concurrent execs from the queue for a node
+  private drainQueue(nodeId: string): void {
+    const queue = this.commandQueues.get(nodeId);
+    if (!queue || queue.length === 0) return;
+
+    const active = this.activeExecs.get(nodeId) ?? 0;
+    const slots = QUEUE_CONCURRENCY - active;
+    if (slots <= 0) return;
+
+    const toRun = queue.splice(0, slots);
+    this.activeExecs.set(nodeId, active + toRun.length);
+
+    for (const entry of toRun) {
+      this.exec(entry.nodeId, entry.command).then((result) => {
+        entry.resolve(result);
+        this.activeExecs.set(nodeId, (this.activeExecs.get(nodeId) ?? 1) - 1);
+        this.drainQueue(nodeId);
+      });
+    }
+  }
+
+  // ── Latency tracking ────────────────────────────────────────────────────────
+
+  private recordLatency(nodeId: string, ms: number): void {
+    const history = this.latencyHistory.get(nodeId) ?? [];
+    history.push(ms);
+    if (history.length > LATENCY_HISTORY_SIZE) history.shift();
+    this.latencyHistory.set(nodeId, history);
+  }
+
+  private avgLatency(nodeId: string): number {
+    const history = this.latencyHistory.get(nodeId);
+    if (!history || history.length === 0) return Infinity;
+    return history.reduce((sum, v) => sum + v, 0) / history.length;
+  }
+
+  // Returns the online node with the lowest average latency, optionally
+  // excluding specified node IDs (e.g. when retrying after a failure).
+  getBestNode(exclude?: string[]): string {
+    const excluded = new Set(exclude ?? []);
+    const candidates = this.getOnlineNodes().filter(
+      (id) => id !== 'windows' && !excluded.has(id)
+    );
+
+    if (candidates.length === 0) return 'windows';
+
+    let best = candidates[0];
+    let bestAvg = this.avgLatency(best);
+
+    for (let i = 1; i < candidates.length; i++) {
+      const avg = this.avgLatency(candidates[i]);
+      if (avg < bestAvg) {
+        best = candidates[i];
+        bestAvg = avg;
+      }
+    }
+
+    return best;
+  }
+
+  // ── Connection pool stats ───────────────────────────────────────────────────
+
+  getPoolStats(): {
+    node: string;
+    connected: boolean;
+    activeHost: string | null;
+    avgLatencyMs: number;
+    failures: number;
+    totalExecs: number;
+  }[] {
+    const stats = [];
+
+    // Always include the local windows node
+    stats.push({
+      node: 'windows',
+      connected: true,
+      activeHost: 'localhost',
+      avgLatencyMs: 0,
+      failures: 0,
+      totalExecs: 0,
+    });
+
+    for (const [id, conn] of this.connections) {
+      const avg = this.avgLatency(id);
+      stats.push({
+        node: id,
+        connected: conn.connected,
+        activeHost: conn.activeHost,
+        avgLatencyMs: avg === Infinity ? -1 : Math.round(avg),
+        failures: conn.failures,
+        totalExecs: conn.totalExecs,
+      });
+    }
+
+    return stats;
   }
 
   private execLocal(command: string, start: number): Promise<ExecResult> {
@@ -352,8 +574,9 @@ export class NodeManager {
       const pings = [...this.connections.entries()]
         .filter(([, conn]) => conn.connected && conn.circuitOpenUntil <= Date.now())
         .map(async ([nodeId]) => {
+          // Use priority 0 — health pings bypass the queue and execute immediately
           const start = Date.now();
-          const result = await this.exec(nodeId, ':');  // ':' is bash builtin — zero fork
+          const result = await this.execPriority(nodeId, ':', 0);  // ':' is bash builtin — zero fork
           const elapsed = Date.now() - start;
           if (elapsed > 2000 || result.code !== 0) {
             process.stderr.write(`[health] ${nodeId} degraded (${elapsed}ms)\n`);
@@ -369,5 +592,8 @@ export class NodeManager {
     this.connections.clear();
     this.statusCache.clear();
     this.keyCache.clear();
+    this.latencyHistory.clear();
+    this.commandQueues.clear();
+    this.activeExecs.clear();
   }
 }

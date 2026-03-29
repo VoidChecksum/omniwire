@@ -26,7 +26,26 @@ function t(ms: number): string {
 }
 
 function trim(s: string): string {
-  return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + '\n...(truncated)' : s;
+  if (s.length <= MAX_OUTPUT) return s;
+
+  // Detect JSON — show item count on truncation
+  if (s.trimStart().startsWith('[') || s.trimStart().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(s);
+      const count = Array.isArray(parsed) ? parsed.length : Object.keys(parsed).length;
+      return s.slice(0, MAX_OUTPUT - 50) + `\n...(truncated, ${count} items total)`;
+    } catch {}
+  }
+
+  // Detect table-like output — show header + tail
+  const lines = s.split('\n');
+  if (lines.length > 30) {
+    const header = lines.slice(0, 2).join('\n');
+    const lastLines = lines.slice(-5).join('\n');
+    return header + '\n...\n' + lastLines + `\n(${lines.length} lines total)`;
+  }
+
+  return s.slice(0, MAX_OUTPUT) + '\n...(truncated)';
 }
 
 function ok(node: string, ms: number, body: string, label?: string): McpResult {
@@ -139,8 +158,38 @@ function buildVpnWrappedCmd(vpnSpec: string, innerCmd: string): string {
   return innerCmd;
 }
 
+// -- Command safety -- block patterns that could cause irreversible system damage
+const BLOCKED_PATTERNS = [
+  /rm\s+-rf\s+\/(?!\w)/,                   // rm -rf / (but allow rm -rf /tmp/something)
+  /dd\s+if=\/dev\/zero.*of=\/dev\/sd/,      // dd zeroing disk
+  /mkfs\./,                                 // format filesystem
+  /:(){ :\|:& };:/,                         // fork bomb
+  />\s*\/dev\/sd/,                          // redirect to disk device
+  /chmod\s+-R\s+777\s+\//,                  // chmod 777 /
+];
+
+function checkCommandSafety(cmd: string): string | null {
+  for (const pattern of BLOCKED_PATTERNS) {
+    if (pattern.test(cmd)) return `Blocked dangerous pattern: ${pattern.source}`;
+  }
+  return null;
+}
+
 // -- Agentic state -- shared across tool calls in the same MCP session --------
+// Session-scoped: all keys are cleared on process restart (not persisted to disk).
 const resultStore = new Map<string, string>();  // key -> value store for chaining
+
+// -- Audit log -- circular buffer of last 1000 exec events -------------------
+interface AuditEntry { ts: number; tool: string; node: string; command: string; code: number; durationMs: number }
+const auditLog: AuditEntry[] = [];
+
+// -- Alias store -- in-memory command shortcuts ------------------------------
+const aliasStore = new Map<string, string>();  // name -> command template
+
+// -- Trace store -- distributed trace spans ---------------------------------
+interface TraceSpan { node: string; command: string; startMs: number; endMs: number; result: string }
+interface Trace { spans: TraceSpan[]; startMs: number; done: boolean }
+const traceStore = new Map<string, Trace>();
 
 // -- Background task registry -- dispatch-and-poll for any tool ---------------
 interface BgTask { id: string; node: string; label: string; startedAt: number; promise: Promise<McpResult>; result?: McpResult }
@@ -154,6 +203,102 @@ function dispatchBg(node: string, label: string, fn: () => Promise<McpResult>): 
   task.promise.then((r) => { task.result = r; });
   bgTasks.set(id, task);
   return okBrief(`BACKGROUND ${id} dispatched on ${node}: ${label}`);
+}
+// -- CyberBase persistence layer -- fire-and-forget writes to PostgreSQL ------
+// All tool data auto-persists to CyberBase without blocking responses.
+// Uses the SSH connection to contabo (where PostgreSQL runs).
+// Category-based key-value store in sync_items table.
+let cbManager: NodeManager | null = null;
+const CB_QUEUE: string[] = [];
+let cbDraining = false;
+
+function cbInit(mgr: NodeManager) { cbManager = mgr; }
+
+/** Fire-and-forget write to CyberBase knowledge table. Never blocks, never throws. */
+function cb(category: string, key: string, value: string) {
+  if (!cbManager) return;
+  const valEsc = value.replace(/'/g, "''").slice(0, 50000);
+  const keyEsc = `${category}:${key}`.replace(/'/g, "''");
+  // Upsert: delete old + insert new (no unique constraint on source_tool+key)
+  const sql = `DELETE FROM knowledge WHERE source_tool='omniwire' AND key='${keyEsc}'; INSERT INTO knowledge (source_tool, key, value, updated_at) VALUES ('omniwire', '${keyEsc}', jsonb_build_object('data', '${valEsc}'), NOW());`;
+  CB_QUEUE.push(sql);
+  if (!cbDraining) drainCb();
+}
+
+/** Batch-drain CyberBase write queue (max 10 per flush) */
+async function drainCb() {
+  if (!cbManager || CB_QUEUE.length === 0) { cbDraining = false; return; }
+  cbDraining = true;
+  const batch = CB_QUEUE.splice(0, 10);
+  const combined = batch.join(' ');
+  try {
+    await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "${combined}" 2>/dev/null`);
+  } catch { /* never fail */ }
+  if (CB_QUEUE.length > 0) setTimeout(drainCb, 100);
+  else cbDraining = false;
+}
+
+/** Read from CyberBase knowledge table. Returns value or null. */
+async function cbGet(category: string, key: string): Promise<string | null> {
+  if (!cbManager) return null;
+  const fullKey = `${category}:${key}`.replace(/'/g, "''");
+  try {
+    const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SELECT value->>'data' FROM knowledge WHERE source_tool='omniwire' AND key='${fullKey}';" 2>/dev/null`);
+    const val = r.stdout.trim();
+    return val || null;
+  } catch { return null; }
+}
+
+/** List keys in a CyberBase category (from knowledge table) */
+async function cbList(category: string): Promise<string[]> {
+  if (!cbManager) return [];
+  const prefix = `${category}:`.replace(/'/g, "''");
+  try {
+    const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SELECT replace(key, '${prefix}', '') FROM knowledge WHERE source_tool='omniwire' AND key LIKE '${prefix}%' ORDER BY updated_at DESC LIMIT 100;" 2>/dev/null`);
+    return r.stdout.trim().split('\n').map(s => s.trim()).filter(Boolean);
+  } catch { return []; }
+}
+
+/** Full-text search across CyberBase knowledge */
+async function cbSearch(query: string, sourceFilter?: string): Promise<string> {
+  if (!cbManager) return '';
+  const srcFilter = sourceFilter ? `AND source_tool='${sourceFilter}'` : '';
+  const escaped = query.replace(/'/g, "''");
+  try {
+    const r = await cbManager.exec('contabo',
+      `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SELECT source_tool, key, substring(value::text,1,200) FROM knowledge WHERE (value::text ILIKE '%${escaped}%' OR key ILIKE '%${escaped}%') ${srcFilter} ORDER BY updated_at DESC LIMIT 20;" 2>/dev/null`
+    );
+    return r.stdout.trim();
+  } catch { return ''; }
+}
+
+/** Semantic search via pgvector (if embeddings populated) or full-text fallback */
+async function cbSemanticSearch(query: string, limit: number = 10): Promise<string> {
+  if (!cbManager) return '';
+  const escaped = query.replace(/'/g, "''");
+  try {
+    // Try pgvector cosine similarity first
+    const r = await cbManager.exec('contabo',
+      `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "
+        SELECT source_tool, key, substring(value::text,1,300)
+        FROM knowledge
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> (SELECT embedding FROM knowledge WHERE key ILIKE '%${escaped}%' LIMIT 1)
+        LIMIT ${limit};
+      " 2>/dev/null`
+    );
+    if (r.stdout.trim()) return r.stdout.trim();
+    // Fallback: ILIKE full-text
+    const r2 = await cbManager.exec('contabo',
+      `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "
+        SELECT source_tool, key, substring(value::text,1,300)
+        FROM knowledge
+        WHERE value::text ILIKE '%${escaped}%' OR key ILIKE '%${escaped}%'
+        ORDER BY updated_at DESC LIMIT ${limit};
+      " 2>/dev/null`
+    );
+    return r2.stdout.trim();
+  } catch { return ''; }
 }
 // -----------------------------------------------------------------------------
 
@@ -181,6 +326,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
   };
   // ---------------------------------------------------------------------------
 
+  cbInit(manager);  // Initialize CyberBase persistence layer
   const shells = new ShellManager(manager);
   const realtime = new RealtimeChannel(manager);
   const tunnels = new TunnelManager(manager);
@@ -267,14 +413,25 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         effectiveCmd = buildVpnWrappedCmd(via_vpn, effectiveCmd);
       }
 
+      const blocked = checkCommandSafety(effectiveCmd);
+      if (blocked) return fail(blocked);
+
       let result = await manager.exec(nodeId, effectiveCmd);
+      auditLog.push({ ts: Date.now(), tool: 'exec', node: nodeId, command: resolvedCmd ?? 'script', code: result.code, durationMs: result.durationMs });
+      if (auditLog.length > 1000) auditLog.shift();
+      // Persist audit to CyberBase every 10 execs
+      if (auditLog.length % 10 === 0) cb('audit', `batch-${Date.now()}`, JSON.stringify(auditLog.slice(-10)));
+
       for (let attempt = 0; attempt < maxRetries && result.code !== 0; attempt++) {
         await new Promise((r) => setTimeout(r, 1000));
         result = await manager.exec(nodeId, effectiveCmd);
+        auditLog.push({ ts: Date.now(), tool: 'exec', node: nodeId, command: resolvedCmd ?? 'script', code: result.code, durationMs: result.durationMs });
+        if (auditLog.length > 1000) auditLog.shift();
       }
 
       if (store_as && result.code === 0) {
         resultStore.set(store_as, result.stdout.trim());
+        cb('store', store_as, result.stdout.trim());  // persist to CyberBase
       }
 
       if (assertPattern && result.code === 0) {
@@ -1610,7 +1767,878 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
     }
   );
 
-  // --- Tool 32: omniwire_clipboard ---
+  // --- Tool 32: omniwire_cookies ---
+  server.tool(
+    'omniwire_cookies',
+    'Cookie management across mesh nodes. Import/export/convert between JSON, Header string, and Netscape cookies.txt formats. Sync cookies between nodes. Extract from Chrome/Firefox.',
+    {
+      action: z.enum(['get', 'set', 'export', 'import', 'convert', 'sync', 'extract', 'clear', 'list', 'cyberbase-get', 'cyberbase-set', '1password-get', '1password-set']).describe('get/set/export/import/convert/sync/extract/clear/list + cyberbase-get/set (PostgreSQL), 1password-get/set (op CLI)'),
+      node: z.string().optional().describe('Node (default: contabo)'),
+      domain: z.string().optional().describe('Domain filter (e.g. "github.com")'),
+      format: z.enum(['json', 'header', 'netscape']).optional().describe('json=[{name,value,domain,...}], header="name=val; name2=val2", netscape=cookies.txt (curl/wget)'),
+      cookies: z.string().optional().describe('Cookie data for set/import/convert. Format auto-detected.'),
+      file: z.string().optional().describe('File path (default: /tmp/.omniwire-cookies/<domain>.txt)'),
+      target_format: z.enum(['json', 'header', 'netscape']).optional().describe('Target format for convert'),
+      dst_nodes: z.array(z.string()).optional().describe('Destination nodes for sync'),
+    },
+    async ({ action, node, domain, format: fmt, cookies: cookieData, file, target_format, dst_nodes }) => {
+      const nodeId = node ?? 'contabo';
+      const cookieDir = '/tmp/.omniwire-cookies';
+      const cookieFile = file ?? (domain ? `${cookieDir}/${domain.replace(/\./g, '_')}.txt` : `${cookieDir}/all.txt`);
+
+      const jsonToHeader = `python3 -c "import json,sys;c=json.load(sys.stdin);c=c if isinstance(c,list) else [c];print('; '.join(f\\"{x['name']}={x['value']}\\" for x in c))"`;
+      const jsonToNetscape = `python3 -c "import json,sys;c=json.load(sys.stdin);c=c if isinstance(c,list) else [c];print('# Netscape HTTP Cookie File');[print(f\\"{x.get('domain','.')}\t{'TRUE' if x.get('domain','').startswith('.') else 'FALSE'}\t{x.get('path','/')}\t{'TRUE' if x.get('secure') else 'FALSE'}\t{x.get('expires',0)}\t{x['name']}\t{x['value']}\\") for x in c]"`;
+      const headerToJson = `python3 -c "import json,sys;h=sys.stdin.read().strip();print(json.dumps([{'name':p.split('=',1)[0].strip(),'value':p.split('=',1)[1].strip(),'domain':'','path':'/','secure':False} for p in h.split(';') if '=' in p],indent=2))"`;
+      const netscapeToJson = `python3 -c "import json,sys;cookies=[];[cookies.append({'domain':p[0],'path':p[2],'secure':p[3]=='TRUE','expires':int(p[4]) if p[4].isdigit() else 0,'name':p[5],'value':p[6]}) for line in sys.stdin if not line.startswith('#') and line.strip() for p in [line.strip().split('\t')] if len(p)>=7];print(json.dumps(cookies,indent=2))"`;
+
+      const detectFmt = (d: string) => {
+        const t = d.trim();
+        if (t.startsWith('[') || t.startsWith('{')) return 'json';
+        if (t.includes('\t') && (t.includes('TRUE') || t.includes('FALSE'))) return 'netscape';
+        return 'header';
+      };
+
+      if (action === 'list') {
+        const r = await manager.exec(nodeId, `mkdir -p ${cookieDir}; ls -la ${cookieDir}/ 2>/dev/null | tail -n +2 || echo "(empty)"`);
+        return ok(nodeId, r.durationMs, r.stdout, 'cookie files');
+      }
+      if (action === 'get') {
+        const r = await manager.exec(nodeId, `cat "${cookieFile}" 2>/dev/null || echo "no cookies at ${cookieFile}"`);
+        return ok(nodeId, r.durationMs, r.stdout, `cookies ${domain ?? 'all'}`);
+      }
+      if (action === 'set' && cookieData) {
+        const inFmt = fmt ?? detectFmt(cookieData);
+        const esc = cookieData.replace(/'/g, "'\\''");
+        const cmd = inFmt === 'json'
+          ? `mkdir -p ${cookieDir}; echo '${esc}' > "${cookieFile}"`
+          : inFmt === 'header'
+            ? `mkdir -p ${cookieDir}; echo '${esc}' | ${headerToJson} > "${cookieFile}"`
+            : `mkdir -p ${cookieDir}; echo '${esc}' | ${netscapeToJson} > "${cookieFile}"`;
+        const r = await manager.exec(nodeId, cmd);
+        return r.code === 0 ? okBrief(`Cookies saved to ${nodeId}:${cookieFile} (from ${inFmt})`) : fail(r.stderr);
+      }
+      if (action === 'convert' && cookieData && target_format) {
+        const inFmt = fmt ?? detectFmt(cookieData);
+        if (inFmt === target_format) return okBrief(cookieData);
+        const esc = cookieData.replace(/'/g, "'\\''");
+        const toJson = inFmt === 'header' ? `echo '${esc}' | ${headerToJson}` : inFmt === 'netscape' ? `echo '${esc}' | ${netscapeToJson}` : `echo '${esc}'`;
+        const cmd = target_format === 'json' ? toJson : target_format === 'header' ? `${toJson} | ${jsonToHeader}` : `${toJson} | ${jsonToNetscape}`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, `${inFmt} → ${target_format}`);
+      }
+      if (action === 'export') {
+        const outFmt = fmt ?? 'json';
+        const cmd = outFmt === 'header' ? `cat "${cookieFile}" | ${jsonToHeader}` : outFmt === 'netscape' ? `cat "${cookieFile}" | ${jsonToNetscape}` : `cat "${cookieFile}"`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, `export ${outFmt}`);
+      }
+      if (action === 'import' && cookieData) {
+        const inFmt = fmt ?? detectFmt(cookieData);
+        const esc = cookieData.replace(/'/g, "'\\''");
+        const cmd = `mkdir -p ${cookieDir}; echo '${esc}' ${inFmt !== 'json' ? `| ${inFmt === 'header' ? headerToJson : netscapeToJson}` : ''} > "${cookieFile}"`;
+        const r = await manager.exec(nodeId, cmd);
+        return r.code === 0 ? okBrief(`Imported to ${nodeId}:${cookieFile}`) : fail(r.stderr);
+      }
+      if (action === 'extract') {
+        const domFilter = domain ? `WHERE host_key LIKE '%${domain}%'` : '';
+        const domFilter2 = domain ? `WHERE host LIKE '%${domain}%'` : '';
+        const cmd = `FOUND=0; for db in ~/.config/google-chrome/Default/Cookies ~/.config/chromium/Default/Cookies; do [ -f "$db" ] && { echo "--- Chrome: $db ---"; sqlite3 "$db" "SELECT host_key,name,value,path,expires_utc,is_secure FROM cookies ${domFilter} LIMIT 100;" 2>/dev/null; FOUND=1; }; done; for db in ~/.mozilla/firefox/*/cookies.sqlite; do [ -f "$db" ] && { echo "--- Firefox: $db ---"; sqlite3 "$db" "SELECT host,name,value,path,expiry,isSecure FROM moz_cookies ${domFilter2} LIMIT 100;" 2>/dev/null; FOUND=1; }; done; [ $FOUND -eq 0 ] && echo "No browser DBs found"`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, `extract ${domain ?? 'all'}`);
+      }
+      if (action === 'sync') {
+        const targets = dst_nodes ?? manager.getOnlineNodes().filter(n => n !== nodeId && n !== 'windows');
+        const src = await manager.exec(nodeId, `cat "${cookieFile}" 2>/dev/null`);
+        if (src.code !== 0) return fail(`No cookies at ${cookieFile}`);
+        const b64 = Buffer.from(src.stdout).toString('base64');
+
+        // 1. Sync to mesh nodes
+        const nodeResults = await Promise.all(targets.map(async (dst) => {
+          const r = await manager.exec(dst, `mkdir -p ${cookieDir}; echo '${b64}' | base64 -d > "${cookieFile}"`);
+          return { ...r, nodeId: dst };
+        }));
+
+        // 2. Sync to CyberBase (PostgreSQL on contabo)
+        const domainKey = domain ?? 'all';
+        const pgEscaped = src.stdout.replace(/'/g, "''");
+        const cyberbaseResult = await manager.exec('contabo',
+          `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "INSERT INTO sync_items (category, key, value, updated_at) VALUES ('cookies', '${domainKey}', '${pgEscaped}', NOW()) ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();" 2>/dev/null && echo "cyberbase: synced" || echo "cyberbase: skipped (no DB)"`
+        );
+
+        // 3. Sync to 1Password (if op CLI available)
+        const opResult = await manager.exec(nodeId,
+          `command -v op >/dev/null 2>&1 && { ` +
+            `op item get "OmniWire Cookies - ${domainKey}" --vault "CyberBase" >/dev/null 2>&1 && ` +
+            `op item edit "OmniWire Cookies - ${domainKey}" --vault "CyberBase" "notesPlain=$(cat "${cookieFile}")" 2>/dev/null || ` +
+            `op item create --category=SecureNote --vault="CyberBase" --title="OmniWire Cookies - ${domainKey}" "notesPlain=$(cat "${cookieFile}")" 2>/dev/null; ` +
+            `echo "1password: synced"; } || echo "1password: op not available"`
+        );
+
+        const parts = nodeResults.map(r => `${r.nodeId}: ${r.code === 0 ? 'ok' : 'fail'}`);
+        parts.push(cyberbaseResult.stdout.trim());
+        parts.push(opResult.stdout.trim());
+        return okBrief(`Cookie sync: ${parts.join(' | ')}`);
+      }
+      if (action === 'clear') {
+        const r = await manager.exec(nodeId, `rm -f ${domain ? cookieFile : `${cookieDir}/*`} 2>/dev/null; echo "cleared"`);
+        return ok(nodeId, r.durationMs, r.stdout, 'clear cookies');
+      }
+
+      if (action === 'cyberbase-get') {
+        const domainKey = domain ?? 'all';
+        const r = await manager.exec('contabo',
+          `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SELECT value FROM sync_items WHERE category='cookies' AND key='${domainKey}';" 2>/dev/null`
+        );
+        if (!r.stdout.trim()) return fail(`No cookies for '${domainKey}' in CyberBase`);
+        return ok('contabo', r.durationMs, r.stdout.trim(), `cyberbase cookies: ${domainKey}`);
+      }
+
+      if (action === 'cyberbase-set' && cookieData) {
+        const domainKey = domain ?? 'all';
+        const pgEsc = cookieData.replace(/'/g, "''");
+        const r = await manager.exec('contabo',
+          `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "INSERT INTO sync_items (category, key, value, updated_at) VALUES ('cookies', '${domainKey}', '${pgEsc}', NOW()) ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();" 2>/dev/null`
+        );
+        return r.code === 0 ? okBrief(`Cookies stored in CyberBase: ${domainKey}`) : fail(r.stderr);
+      }
+
+      if (action === '1password-get') {
+        const domainKey = domain ?? 'all';
+        const r = await manager.exec(nodeId,
+          `op item get "OmniWire Cookies - ${domainKey}" --vault "CyberBase" --fields notesPlain 2>/dev/null || echo "not found in 1Password"`
+        );
+        return ok(nodeId, r.durationMs, r.stdout, `1password cookies: ${domainKey}`);
+      }
+
+      if (action === '1password-set' && cookieData) {
+        const domainKey = domain ?? 'all';
+        const esc = cookieData.replace(/'/g, "'\\''");
+        const r = await manager.exec(nodeId,
+          `command -v op >/dev/null || { echo "op CLI not installed"; exit 1; }; ` +
+          `op item get "OmniWire Cookies - ${domainKey}" --vault "CyberBase" >/dev/null 2>&1 && ` +
+          `op item edit "OmniWire Cookies - ${domainKey}" --vault "CyberBase" "notesPlain=${esc}" 2>/dev/null || ` +
+          `op item create --category=SecureNote --vault="CyberBase" --title="OmniWire Cookies - ${domainKey}" "notesPlain=${esc}" 2>/dev/null`
+        );
+        return r.code === 0 ? okBrief(`Cookies stored in 1Password: ${domainKey}`) : fail(r.stderr || r.stdout);
+      }
+
+      return fail('Invalid action or missing params');
+    }
+  );
+
+  // --- Tool 33: omniwire_cdp ---
+  server.tool(
+    'omniwire_cdp',
+    'Chrome DevTools Protocol browser control on mesh nodes. Launch headless Chrome, navigate, screenshot, extract DOM/cookies, save PDF. For scraping, testing, recon.',
+    {
+      action: z.enum(['launch', 'navigate', 'screenshot', 'html', 'pdf', 'cookies', 'tabs', 'close', 'list']).describe('launch=start Chrome, navigate=open URL, screenshot=capture, html=dump DOM, pdf=save PDF, cookies=extract, tabs=list tabs, close=kill, list=sessions'),
+      node: z.string().optional().describe('Node (default: contabo)'),
+      url: z.string().optional().describe('URL for navigate/screenshot/html/pdf'),
+      file: z.string().optional().describe('Output path for screenshot/pdf'),
+      session_id: z.string().optional().describe('Session ID from launch'),
+    },
+    async ({ action, node, url, file: outFile, session_id }) => {
+      const nodeId = node ?? 'contabo';
+      const sdir = '/tmp/.omniwire-cdp';
+
+      if (action === 'launch') {
+        const id = `cdp-${Date.now().toString(36)}`;
+        const port = 9222 + Math.floor(Math.random() * 100);
+        const cmd = `mkdir -p ${sdir}; command -v google-chrome >/dev/null || command -v chromium-browser >/dev/null || { echo "chrome not installed"; exit 1; }; ` +
+          `CHROME=$(command -v google-chrome || command -v chromium-browser); ` +
+          `$CHROME --headless --disable-gpu --no-sandbox --remote-debugging-port=${port} --user-data-dir=${sdir}/${id} ${url ? `"${url}"` : 'about:blank'} &>/dev/null & ` +
+          `echo $! > ${sdir}/${id}.pid; echo ${port} > ${sdir}/${id}.port; sleep 1; ` +
+          `echo "session=${id} port=${port} pid=$(cat ${sdir}/${id}.pid)"`;
+        const r = await manager.exec(nodeId, cmd);
+        if (r.code === 0) resultStore.set('cdp_session', id);
+        return ok(nodeId, r.durationMs, r.stdout, 'chrome launch');
+      }
+
+      const sid = session_id ?? resultStore.get('cdp_session') ?? '';
+
+      if (action === 'navigate' && url) {
+        const cmd = `PORT=$(cat ${sdir}/${sid}.port 2>/dev/null); curl -sf "http://localhost:$PORT/json/new?${encodeURIComponent(url)}" 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(f\\"tab={d.get('id','')} url={d.get('url','')}\\")" 2>/dev/null || echo "opened ${url}"`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, `navigate`);
+      }
+
+      if (action === 'screenshot') {
+        const output = outFile ?? `/tmp/screenshot-${Date.now()}.png`;
+        const target = url ?? (sid ? `$(curl -sf http://localhost:$(cat ${sdir}/${sid}.port)/json/list 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)[0]['url'])" 2>/dev/null)` : 'about:blank');
+        const cmd = `CHROME=$(command -v google-chrome || command -v chromium-browser); $CHROME --headless --no-sandbox --disable-gpu --screenshot="${output}" --window-size=1920,1080 "${target}" 2>/dev/null && echo "saved: ${output} ($(du -h "${output}" | cut -f1))"`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, 'screenshot');
+      }
+
+      if (action === 'html') {
+        const target = url ?? 'about:blank';
+        const cmd = `CHROME=$(command -v google-chrome || command -v chromium-browser); $CHROME --headless --no-sandbox --disable-gpu --dump-dom "${target}" 2>/dev/null | head -200`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, 'html');
+      }
+
+      if (action === 'pdf') {
+        const output = outFile ?? `/tmp/page-${Date.now()}.pdf`;
+        const target = url ?? 'about:blank';
+        const cmd = `CHROME=$(command -v google-chrome || command -v chromium-browser); $CHROME --headless --no-sandbox --disable-gpu --print-to-pdf="${output}" --no-pdf-header-footer "${target}" 2>/dev/null && echo "saved: ${output} ($(du -h "${output}" | cut -f1))"`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, 'pdf');
+      }
+
+      if (action === 'cookies') {
+        const cmd = `find ${sdir}/${sid}/ -name "Cookies" 2>/dev/null | head -1 | xargs -I{} sqlite3 "{}" "SELECT host_key,name,value,path,expires_utc FROM cookies LIMIT 50;" 2>/dev/null || echo "no cookies DB"`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, 'cdp cookies');
+      }
+
+      if (action === 'tabs') {
+        const cmd = `PORT=$(cat ${sdir}/${sid}.port 2>/dev/null); curl -sf http://localhost:$PORT/json/list 2>/dev/null | python3 -c "import json,sys;[print(f\\"{t['id'][:8]}  {t.get('url','')}\\" ) for t in json.load(sys.stdin)]" 2>/dev/null || echo "no tabs"`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, 'tabs');
+      }
+
+      if (action === 'close') {
+        const cmd = `PID=$(cat ${sdir}/${sid}.pid 2>/dev/null); [ -n "$PID" ] && kill $PID 2>/dev/null && rm -rf ${sdir}/${sid}* && echo "closed ${sid}" || echo "not found"`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, 'close');
+      }
+
+      if (action === 'list') {
+        const cmd = `ls ${sdir}/*.pid 2>/dev/null | while read f; do id=$(basename "$f" .pid); port=$(cat ${sdir}/$id.port 2>/dev/null); pid=$(cat "$f"); ps -p $pid >/dev/null 2>&1 && s="running" || s="dead"; echo "$id  port=$port  pid=$pid  $s"; done || echo "no sessions"`;
+        const r = await manager.exec(nodeId, cmd);
+        return ok(nodeId, r.durationMs, r.stdout, 'cdp sessions');
+      }
+
+      return fail('Invalid action or missing params');
+    }
+  );
+
+  // --- Tool 34: omniwire_proxy ---
+  server.tool(
+    'omniwire_proxy',
+    'HTTP/SOCKS proxy management on mesh nodes. Start HTTP proxies, SOCKS tunnels via SSH -D, or socat TCP forwarders. Actions: start, stop, status, list.',
+    {
+      action: z.enum(['start', 'stop', 'status', 'list']).describe('Action'),
+      node: z.string().optional().describe('Target node (default: contabo)'),
+      type: z.enum(['http', 'socks', 'forward']).optional().describe('http=python http.server, socks=SSH -D SOCKS5, forward=socat TCP forwarder'),
+      port: z.number().optional().describe('Local port to listen on'),
+      target: z.string().optional().describe('Target for forward type (host:port)'),
+    },
+    async ({ action, node, type, port, target }) => {
+      const nodeId = node ?? 'contabo';
+      const pd = '/tmp/.omniwire-proxies';
+
+      if (action === 'list' || action === 'status') {
+        const result = await manager.exec(nodeId, `mkdir -p ${pd}; ls ${pd}/*.pid 2>/dev/null | while read f; do id=$(basename "$f" .pid); pid=$(cat "$f" 2>/dev/null); ptype=$(cat "${pd}/$id.type" 2>/dev/null); pport=$(cat "${pd}/$id.port" 2>/dev/null); alive=$(kill -0 "$pid" 2>/dev/null && echo running || echo dead); echo "$id  $ptype  :$pport  pid=$pid  $alive"; done || echo "(none)"; ss -tlnp 2>/dev/null | grep LISTEN | head -20`);
+        return ok(nodeId, result.durationMs, result.stdout, 'proxy status');
+      }
+
+      if (action === 'start') {
+        const proxyType = type ?? 'http';
+        const listenPort = port ?? (proxyType === 'http' ? 8888 : proxyType === 'socks' ? 1080 : 9090);
+        const id = `ow-proxy-${proxyType}-${listenPort}`;
+        let startCmd: string;
+        if (proxyType === 'http') {
+          startCmd = `cd /tmp && python3 -m http.server ${listenPort} --bind 0.0.0.0 >/tmp/${id}.log 2>&1 & echo $! > ${pd}/${id}.pid`;
+        } else if (proxyType === 'socks') {
+          startCmd = `ssh -D 0.0.0.0:${listenPort} -N -f -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes localhost 2>/dev/null; pgrep -f "ssh -D.*${listenPort}" | head -1 > ${pd}/${id}.pid`;
+        } else {
+          if (!target) return fail('target (host:port) required for forward type');
+          const et = target.replace(/'/g, "'\\''");
+          startCmd = `socat TCP-LISTEN:${listenPort},fork,reuseaddr TCP:${et} >/tmp/${id}.log 2>&1 & echo $! > ${pd}/${id}.pid`;
+        }
+        const result = await manager.exec(nodeId, `mkdir -p ${pd}; ${startCmd}; echo "${proxyType}" > ${pd}/${id}.type; echo "${listenPort}" > ${pd}/${id}.port; sleep 0.5; pid=$(cat ${pd}/${id}.pid 2>/dev/null); kill -0 "$pid" 2>/dev/null && echo "started: ${id} on :${listenPort} pid=$pid" || echo "WARN: check /tmp/${id}.log"`);
+        return ok(nodeId, result.durationMs, result.stdout, `proxy start ${proxyType}:${listenPort}`);
+      }
+
+      if (action === 'stop') {
+        const listenPort = port ?? 0;
+        const stopCmd = listenPort
+          ? `for f in ${pd}/*.port; do p=$(cat "$f" 2>/dev/null); if [ "$p" = "${listenPort}" ]; then id=$(basename "$f" .port); pid=$(cat "${pd}/$id.pid" 2>/dev/null); kill "$pid" 2>/dev/null; rm -f "${pd}/$id."*; echo "stopped $id"; fi; done`
+          : `for f in ${pd}/*.pid; do pid=$(cat "$f" 2>/dev/null); kill "$pid" 2>/dev/null; done; rm -f ${pd}/*.pid ${pd}/*.type ${pd}/*.port; echo "all proxies stopped"`;
+        const result = await manager.exec(nodeId, `mkdir -p ${pd}; ${stopCmd}`);
+        return ok(nodeId, result.durationMs, result.stdout, 'proxy stop');
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 35: omniwire_dns ---
+  server.tool(
+    'omniwire_dns',
+    'DNS management on mesh nodes. Resolve hostnames, switch DNS servers, flush caches, manage /etc/hosts entries.',
+    {
+      action: z.enum(['resolve', 'set-server', 'flush-cache', 'zone-add', 'zone-list', 'block-domain']).describe('Action'),
+      node: z.string().optional().describe('Target node (default: contabo)'),
+      domain: z.string().optional().describe('Domain to resolve or block'),
+      server: z.string().optional().describe('DNS server IP for set-server (e.g., 1.1.1.1)'),
+      ip: z.string().optional().describe('IP for zone-add or block-domain override (default: 0.0.0.0)'),
+    },
+    async ({ action, node, domain, server, ip }) => {
+      const nodeId = node ?? 'contabo';
+
+      if (action === 'resolve') {
+        if (!domain) return fail('domain required');
+        const d = domain.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `dig +short '${d}' 2>/dev/null || nslookup '${d}' 2>&1 | grep -E 'Address:|Name:' | tail -5`);
+        return ok(nodeId, result.durationMs, result.stdout || '(no result)', `resolve ${domain}`);
+      }
+
+      if (action === 'set-server') {
+        if (!server) return fail('server IP required');
+        const result = await manager.exec(nodeId, `printf 'nameserver ${server}\nsearch %s\n' "$(hostname -d 2>/dev/null || echo local)" | tee /etc/resolv.conf; echo "DNS set to ${server}"; dig +short google.com @${server} 2>/dev/null | head -3`);
+        return ok(nodeId, result.durationMs, result.stdout, `dns set-server ${server}`);
+      }
+
+      if (action === 'flush-cache') {
+        const result = await manager.exec(nodeId, 'systemd-resolve --flush-caches 2>/dev/null && echo "flushed via systemd-resolve" || resolvectl flush-caches 2>/dev/null && echo "flushed via resolvectl" || (service nscd restart 2>/dev/null && echo "nscd restarted") || echo "no cache daemon found"');
+        return ok(nodeId, result.durationMs, result.stdout, 'dns flush-cache');
+      }
+
+      if (action === 'block-domain') {
+        if (!domain) return fail('domain required');
+        const blockIp = ip ?? '0.0.0.0';
+        const d = domain.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `grep -qF '${d}' /etc/hosts 2>/dev/null && echo "already in /etc/hosts" || (echo "${blockIp} ${d}" | tee -a /etc/hosts && echo "blocked ${domain} -> ${blockIp}")`);
+        return ok(nodeId, result.durationMs, result.stdout, `dns block ${domain}`);
+      }
+
+      if (action === 'zone-add') {
+        if (!domain || !ip) return fail('domain and ip required for zone-add');
+        const d = domain.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `grep -qF '${d}' /etc/hosts 2>/dev/null && sed -i "s/.*${d}.*/${ip} ${d}/" /etc/hosts && echo "updated ${domain}" || (echo "${ip} ${d}" >> /etc/hosts && echo "added ${domain} -> ${ip}")`);
+        return ok(nodeId, result.durationMs, result.stdout, `dns zone-add ${domain}`);
+      }
+
+      if (action === 'zone-list') {
+        const result = await manager.exec(nodeId, "grep -v '^#' /etc/hosts | grep -v '^$' | sort");
+        return ok(nodeId, result.durationMs, result.stdout, 'dns zone-list');
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 36: omniwire_backup ---
+  server.tool(
+    'omniwire_backup',
+    'Snapshot and restore paths on mesh nodes. Creates timestamped tarballs in /var/backups/omniwire/. Actions: snapshot, restore, list, diff, cleanup.',
+    {
+      action: z.enum(['snapshot', 'restore', 'list', 'diff', 'cleanup']).describe('Action'),
+      node: z.string().optional().describe('Target node (default: contabo)'),
+      path: z.string().optional().describe('Path to snapshot or restore to'),
+      backup_id: z.string().optional().describe('Backup filename (for restore/diff). Use list to find IDs.'),
+      retention_days: z.number().optional().describe('Days to keep for cleanup (default: 30)'),
+    },
+    async ({ action, node, path, backup_id, retention_days }) => {
+      const nodeId = node ?? 'contabo';
+      const bd = '/var/backups/omniwire';
+
+      if (action === 'snapshot') {
+        if (!path) return fail('path required');
+        const p = path.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `mkdir -p ${bd}; ts=\$(date +%s); host=\$(hostname); out="${bd}/\${host}-\${ts}.tar.gz"; tar czf "$out" '${p}' 2>&1 && ls -lh "$out" && echo "snapshot: $out" || echo "snapshot failed"`);
+        return ok(nodeId, result.durationMs, result.stdout, `backup snapshot ${path}`);
+      }
+
+      if (action === 'list') {
+        const result = await manager.exec(nodeId, `ls -lht ${bd}/ 2>/dev/null | head -30 || echo "(no backups)"`);
+        return ok(nodeId, result.durationMs, result.stdout, 'backup list');
+      }
+
+      if (action === 'restore') {
+        if (!backup_id || !path) return fail('backup_id and path required');
+        const p = path.replace(/'/g, "'\\''");
+        const bid = backup_id.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `mkdir -p '${p}'; tar xzf '${bd}/${bid}' -C '${p}' 2>&1 && echo "restored to ${path}" || echo "restore failed"`);
+        return ok(nodeId, result.durationMs, result.stdout, `backup restore ${backup_id}`);
+      }
+
+      if (action === 'diff') {
+        if (!backup_id || !path) return fail('backup_id and path required for diff');
+        const p = path.replace(/'/g, "'\\''");
+        const bid = backup_id.replace(/'/g, "'\\''");
+        const tmpDir = `/tmp/.ow-diff-${Date.now().toString(36)}`;
+        const result = await manager.exec(nodeId, `mkdir -p ${tmpDir}; tar xzf '${bd}/${bid}' -C ${tmpDir} 2>/dev/null; diff -rq '${p}' ${tmpDir} 2>&1 | head -40; rm -rf ${tmpDir}`);
+        return ok(nodeId, result.durationMs, result.stdout || '(no differences)', `backup diff ${backup_id}`);
+      }
+
+      if (action === 'cleanup') {
+        const days = retention_days ?? 30;
+        const result = await manager.exec(nodeId, `find ${bd}/ -name '*.tar.gz' -mtime +${days} -print -delete 2>/dev/null | wc -l | xargs -I{} echo "removed {} backups older than ${days} days"`);
+        return ok(nodeId, result.durationMs, result.stdout, `backup cleanup >${days}d`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 37: omniwire_container ---
+  server.tool(
+    'omniwire_container',
+    'Full Docker container lifecycle management. Actions: compose-up, compose-down, build, push, logs, ps, prune, stats, inspect.',
+    {
+      action: z.enum(['compose-up', 'compose-down', 'build', 'push', 'logs', 'ps', 'prune', 'stats', 'inspect']).describe('Action'),
+      node: z.string().optional().describe('Target node (default: contabo)'),
+      container: z.string().optional().describe('Container name or ID (for logs, inspect)'),
+      file: z.string().optional().describe('docker-compose file path'),
+      tag: z.string().optional().describe('Image tag for build/push'),
+      context: z.string().optional().describe('Build context path (default: .)'),
+      tail_lines: z.number().optional().describe('Log lines to tail (default: 50)'),
+    },
+    async ({ action, node, container, file, tag, context, tail_lines }) => {
+      const nodeId = node ?? 'contabo';
+
+      if (action === 'compose-up') {
+        const cf = file ? `-f '${file.replace(/'/g, "'\\''")}'` : '';
+        const result = await manager.exec(nodeId, `docker compose ${cf} up -d 2>&1`);
+        return ok(nodeId, result.durationMs, result.stdout + result.stderr, 'compose up');
+      }
+
+      if (action === 'compose-down') {
+        const cf = file ? `-f '${file.replace(/'/g, "'\\''")}'` : '';
+        const result = await manager.exec(nodeId, `docker compose ${cf} down 2>&1`);
+        return ok(nodeId, result.durationMs, result.stdout + result.stderr, 'compose down');
+      }
+
+      if (action === 'build') {
+        if (!tag) return fail('tag required for build');
+        const ctx = context ?? '.';
+        const result = await manager.exec(nodeId, `docker build -t '${tag.replace(/'/g, "'\\''")}' '${ctx.replace(/'/g, "'\\''")}' 2>&1 | tail -20`);
+        return ok(nodeId, result.durationMs, result.stdout, `docker build ${tag}`);
+      }
+
+      if (action === 'push') {
+        if (!tag) return fail('tag required for push');
+        const result = await manager.exec(nodeId, `docker push '${tag.replace(/'/g, "'\\''")}' 2>&1`);
+        return ok(nodeId, result.durationMs, result.stdout + result.stderr, `docker push ${tag}`);
+      }
+
+      if (action === 'logs') {
+        if (!container) return fail('container required for logs');
+        const lines = tail_lines ?? 50;
+        const result = await manager.exec(nodeId, `docker logs --tail ${lines} '${container.replace(/'/g, "'\\''")}' 2>&1`);
+        return ok(nodeId, result.durationMs, result.stdout + result.stderr, `docker logs ${container}`);
+      }
+
+      if (action === 'ps') {
+        const result = await manager.exec(nodeId, `docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>&1`);
+        return ok(nodeId, result.durationMs, result.stdout, 'docker ps');
+      }
+
+      if (action === 'prune') {
+        const result = await manager.exec(nodeId, 'docker system prune -af --volumes 2>&1 | tail -10');
+        return ok(nodeId, result.durationMs, result.stdout, 'docker prune');
+      }
+
+      if (action === 'stats') {
+        const result = await manager.exec(nodeId, `docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>&1`);
+        return ok(nodeId, result.durationMs, result.stdout, 'docker stats');
+      }
+
+      if (action === 'inspect') {
+        if (!container) return fail('container required for inspect');
+        const result = await manager.exec(nodeId, `docker inspect '${container.replace(/'/g, "'\\''")}' 2>&1 | head -60`);
+        return ok(nodeId, result.durationMs, result.stdout, `docker inspect ${container}`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 38: omniwire_cert ---
+  server.tool(
+    'omniwire_cert',
+    'TLS certificate management. List, issue via certbot, renew, check expiry, inspect cert details, or generate self-signed certs.',
+    {
+      action: z.enum(['list', 'issue', 'renew', 'check-expiry', 'info', 'generate-self-signed']).describe('Action'),
+      node: z.string().optional().describe('Target node (default: contabo)'),
+      domain: z.string().optional().describe('Domain name'),
+      email: z.string().optional().describe('Email for certbot ACME registration'),
+      path: z.string().optional().describe('Certificate file path (for info action)'),
+    },
+    async ({ action, node, domain, email, path }) => {
+      const nodeId = node ?? 'contabo';
+
+      if (action === 'list') {
+        const result = await manager.exec(nodeId, "ls /etc/letsencrypt/live/ 2>/dev/null && echo '---pem---' && ls /etc/ssl/certs/*.pem 2>/dev/null | head -20 || echo '(no certs found)'");
+        return ok(nodeId, result.durationMs, result.stdout, 'cert list');
+      }
+
+      if (action === 'issue') {
+        if (!domain) return fail('domain required');
+        if (!email) return fail('email required for certbot');
+        const d = domain.replace(/'/g, "'\\''");
+        const e = email.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `certbot certonly --standalone -d '${d}' --non-interactive --agree-tos -m '${e}' 2>&1 | tail -20`);
+        return ok(nodeId, result.durationMs, result.stdout, `cert issue ${domain}`);
+      }
+
+      if (action === 'renew') {
+        const result = await manager.exec(nodeId, 'certbot renew 2>&1 | tail -20');
+        return ok(nodeId, result.durationMs, result.stdout, 'cert renew');
+      }
+
+      if (action === 'check-expiry') {
+        if (!domain) return fail('domain required');
+        const d = domain.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `echo | openssl s_client -connect '${d}':443 -servername '${d}' 2>/dev/null | openssl x509 -noout -dates 2>/dev/null || echo "could not connect to ${domain}:443"`);
+        return ok(nodeId, result.durationMs, result.stdout, `cert expiry ${domain}`);
+      }
+
+      if (action === 'info') {
+        if (!path) return fail('path required for info');
+        const p = path.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `openssl x509 -in '${p}' -noout -text 2>&1 | head -30`);
+        return ok(nodeId, result.durationMs, result.stdout, `cert info ${path}`);
+      }
+
+      if (action === 'generate-self-signed') {
+        if (!domain) return fail('domain required');
+        const d = domain.replace(/'/g, "'\\''");
+        const outDir = '/etc/ssl/omniwire';
+        const result = await manager.exec(nodeId, `mkdir -p ${outDir}; openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout ${outDir}/${d}.key -out ${outDir}/${d}.crt -subj "/CN=${d}/O=OmniWire/C=NO" 2>&1 && echo "generated: ${outDir}/${d}.crt + .key" && openssl x509 -in ${outDir}/${d}.crt -noout -dates`);
+        return ok(nodeId, result.durationMs, result.stdout, `cert self-signed ${domain}`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 39: omniwire_user ---
+  server.tool(
+    'omniwire_user',
+    'User and SSH key management on mesh nodes. Actions: list, add, remove, add-key, remove-key, sudo-add, sudo-remove, passwd.',
+    {
+      action: z.enum(['list', 'add', 'remove', 'add-key', 'remove-key', 'sudo-add', 'sudo-remove', 'passwd']).describe('Action'),
+      node: z.string().optional().describe('Target node (default: contabo)'),
+      username: z.string().optional().describe('Username to operate on'),
+      ssh_key: z.string().optional().describe('SSH public key string (for add-key/remove-key)'),
+      password: z.string().optional().describe('Password for passwd action'),
+    },
+    async ({ action, node, username, ssh_key, password }) => {
+      const nodeId = node ?? 'contabo';
+
+      if (action === 'list') {
+        const result = await manager.exec(nodeId, "getent passwd | grep -v '/sbin/nologin\|/bin/false\|/usr/sbin/nologin' | awk -F: '{print $1, $3, $6}' | column -t");
+        return ok(nodeId, result.durationMs, result.stdout, 'user list');
+      }
+
+      if (action === 'add') {
+        if (!username) return fail('username required');
+        const u = username.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `useradd -m -s /bin/bash '${u}' 2>&1 && echo "user ${username} created" || echo "user may already exist"`);
+        return ok(nodeId, result.durationMs, result.stdout, `user add ${username}`);
+      }
+
+      if (action === 'remove') {
+        if (!username) return fail('username required');
+        const u = username.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `userdel -r '${u}' 2>&1 && echo "user ${username} removed" || echo "failed to remove user"`);
+        return ok(nodeId, result.durationMs, result.stdout, `user remove ${username}`);
+      }
+
+      if (action === 'add-key') {
+        if (!username || !ssh_key) return fail('username and ssh_key required');
+        const u = username.replace(/'/g, "'\\''");
+        const k = ssh_key.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `homedir=$(getent passwd '${u}' | cut -d: -f6); mkdir -p "$homedir/.ssh"; chmod 700 "$homedir/.ssh"; grep -qF '${k}' "$homedir/.ssh/authorized_keys" 2>/dev/null && echo "key already present" || (echo '${k}' >> "$homedir/.ssh/authorized_keys" && chmod 600 "$homedir/.ssh/authorized_keys" && chown -R '${u}' "$homedir/.ssh" && echo "key added for ${username}")`);
+        return ok(nodeId, result.durationMs, result.stdout, `user add-key ${username}`);
+      }
+
+      if (action === 'remove-key') {
+        if (!username || !ssh_key) return fail('username and ssh_key required');
+        const u = username.replace(/'/g, "'\\''");
+        const k = ssh_key.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `homedir=$(getent passwd '${u}' | cut -d: -f6); grep -vF '${k}' "$homedir/.ssh/authorized_keys" 2>/dev/null > /tmp/.ow-keys.tmp && mv /tmp/.ow-keys.tmp "$homedir/.ssh/authorized_keys" && echo "key removed for ${username}" || echo "failed"`);
+        return ok(nodeId, result.durationMs, result.stdout, `user remove-key ${username}`);
+      }
+
+      if (action === 'sudo-add') {
+        if (!username) return fail('username required');
+        const u = username.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `echo '${u} ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/${u} && chmod 440 /etc/sudoers.d/${u} && echo "sudo added for ${username}"`);
+        return ok(nodeId, result.durationMs, result.stdout, `user sudo-add ${username}`);
+      }
+
+      if (action === 'sudo-remove') {
+        if (!username) return fail('username required');
+        const u = username.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `rm -f '/etc/sudoers.d/${u}' && echo "sudo removed for ${username}"`);
+        return ok(nodeId, result.durationMs, result.stdout, `user sudo-remove ${username}`);
+      }
+
+      if (action === 'passwd') {
+        if (!username || !password) return fail('username and password required');
+        const u = username.replace(/'/g, "'\\''");
+        const pw = password.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `echo '${u}:${pw}' | chpasswd 2>&1 && echo "password updated for ${username}" || echo "chpasswd failed"`);
+        return ok(nodeId, result.durationMs, result.stdout, `user passwd ${username}`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 40: omniwire_schedule ---
+  server.tool(
+    'omniwire_schedule',
+    'Distributed cron scheduling with failover. Stores schedule JSON, writes crontab entries on preferred node, supports fallback nodes. Actions: add, remove, list, run-now, history.',
+    {
+      action: z.enum(['add', 'remove', 'list', 'run-now', 'history']).describe('Action'),
+      node: z.string().optional().describe('Preferred node for execution (default: contabo)'),
+      schedule_id: z.string().optional().describe('Schedule identifier'),
+      command: z.string().optional().describe('Command to schedule (for add)'),
+      cron_expr: z.string().optional().describe('Cron expression (e.g. "0 */6 * * *")'),
+      fallback_nodes: z.array(z.string()).optional().describe('Fallback nodes if primary is offline'),
+    },
+    async ({ action, node, schedule_id, command, cron_expr, fallback_nodes }) => {
+      const nodeId = node ?? 'contabo';
+      const sd = '/etc/omniwire/schedules';
+
+      if (action === 'list') {
+        const result = await manager.exec(nodeId, `mkdir -p ${sd}; ls ${sd}/*.json 2>/dev/null | while read f; do id=$(basename "$f" .json); echo "--- $id ---"; cat "$f" 2>/dev/null | grep -E '"command"|"cron_expr"|"node"'; done || echo "(no schedules)"; echo "=== crontab ==="; crontab -l 2>/dev/null | grep omniwire || echo "(none)"`);
+        return ok(nodeId, result.durationMs, result.stdout, 'schedule list');
+      }
+
+      if (action === 'add') {
+        if (!schedule_id || !command || !cron_expr) return fail('schedule_id, command, and cron_expr required');
+        const sid = schedule_id.replace(/'/g, "'\\''");
+        const cmd = command.replace(/'/g, "'\\''");
+        const meta = JSON.stringify({ id: schedule_id, command, cron_expr, node: nodeId, fallback_nodes: fallback_nodes ?? [], created: Date.now() });
+        const metaEsc = meta.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `mkdir -p ${sd}; echo '${metaEsc}' > ${sd}/${sid}.json; (crontab -l 2>/dev/null; echo '# omniwire:${sid}'; echo '${cron_expr} ${cmd}') | crontab -; echo "schedule ${schedule_id} added: ${cron_expr}"`);
+        return ok(nodeId, result.durationMs, result.stdout, `schedule add ${schedule_id}`);
+      }
+
+      if (action === 'remove') {
+        if (!schedule_id) return fail('schedule_id required');
+        const sid = schedule_id.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `rm -f ${sd}/${sid}.json; crontab -l 2>/dev/null | grep -v 'omniwire:${sid}' | crontab -; echo "schedule ${schedule_id} removed"`);
+        return ok(nodeId, result.durationMs, result.stdout, `schedule remove ${schedule_id}`);
+      }
+
+      if (action === 'run-now') {
+        if (!schedule_id) return fail('schedule_id required');
+        const sid = schedule_id.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `cmd=$(python3 -c "import json,sys; d=json.load(open('${sd}/${sid}.json')); print(d['command'])" 2>/dev/null); if [ -z "$cmd" ]; then echo "schedule ${schedule_id} not found"; exit 1; fi; echo "running: $cmd"; bash -c "$cmd" 2>&1`);
+        return ok(nodeId, result.durationMs, result.stdout, `schedule run-now ${schedule_id}`);
+      }
+
+      if (action === 'history') {
+        if (!schedule_id) return fail('schedule_id required');
+        const sid = schedule_id.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `journalctl --no-pager -n 20 --grep='${sid}' 2>/dev/null || grep '${sid}' /var/log/syslog 2>/dev/null | tail -20 || echo "(no history found)"`);
+        return ok(nodeId, result.durationMs, result.stdout, `schedule history ${schedule_id}`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 41: omniwire_alert ---
+  server.tool(
+    'omniwire_alert',
+    'Threshold alerting for mesh nodes. Fire when disk/mem/load exceeds threshold or service goes down. Destinations: webhook or local log. Actions: set, remove, list, test, history.',
+    {
+      action: z.enum(['set', 'remove', 'list', 'test', 'history']).describe('Action'),
+      node: z.string().optional().describe('Node to monitor (default: contabo)'),
+      alert_id: z.string().optional().describe('Alert rule identifier'),
+      metric: z.enum(['disk', 'mem', 'load', 'offline', 'service']).optional().describe('Metric to monitor'),
+      threshold: z.number().optional().describe('Threshold value (disk/mem: %, load: float)'),
+      webhook_url: z.string().optional().describe('Webhook URL to POST alert payload to'),
+    },
+    async ({ action, node, alert_id, metric, threshold, webhook_url }) => {
+      const nodeId = node ?? 'contabo';
+      const ad = '/tmp/.omniwire-alerts';
+      const fd = `${ad}/fired`;
+
+      if (action === 'list') {
+        const result = await manager.exec(nodeId, `mkdir -p ${ad}; ls ${ad}/*.json 2>/dev/null | while read f; do echo "$(basename $f .json):"; cat "$f" | grep -E '"metric"|"threshold"|"webhook"'; done || echo "(no alerts configured)"`);
+        return ok(nodeId, result.durationMs, result.stdout, 'alert list');
+      }
+
+      if (action === 'set') {
+        if (!alert_id || !metric) return fail('alert_id and metric required');
+        const aid = alert_id.replace(/'/g, "'\\''");
+        const thresh = threshold ?? (metric === 'load' ? 4 : 90);
+        const rule = JSON.stringify({ id: alert_id, node: nodeId, metric, threshold: thresh, webhook_url: webhook_url ?? null, created: Date.now() });
+        const ruleEsc = rule.replace(/'/g, "'\\''");
+
+        const checkScript = metric === 'disk'
+          ? `val=$(df / --output=pcent | tail -1 | tr -d ' %'); [ "$val" -gt '${thresh}' ] && echo ALERT`
+          : metric === 'mem'
+          ? `val=$(free | awk '/Mem:/{printf "%.0f", $3/$2*100}'); [ "$val" -gt '${thresh}' ] && echo ALERT`
+          : metric === 'load'
+          ? `val=$(awk '{print $1}' /proc/loadavg); awk "BEGIN{exit ($val > ${thresh}) ? 0 : 1}" && echo ALERT`
+          : metric === 'service'
+          ? `systemctl is-active '${aid}' >/dev/null 2>&1 || echo ALERT`
+          : `ping -c1 -W2 127.0.0.1 >/dev/null 2>&1 || echo ALERT`;
+
+        const wh = webhook_url ? webhook_url.replace(/'/g, "'\\''") : '';
+        const fireCmd = webhook_url
+          ? `curl -s -X POST '${wh}' -H 'Content-Type: application/json' -d '{"alert":"${aid}","node":"${nodeId}","metric":"${metric}"}' 2>/dev/null`
+          : `mkdir -p ${fd}; echo "$(date -Iseconds) ${aid} ${nodeId} ${metric}" >> ${fd}/events.log`;
+
+        const cronLine = `* * * * * bash -c '${checkScript.replace(/'/g, "'\\''")}' 2>/dev/null | grep -q ALERT && ${fireCmd}`;
+        const result = await manager.exec(nodeId, `mkdir -p ${ad}; echo '${ruleEsc}' > ${ad}/${aid}.json; (crontab -l 2>/dev/null | grep -v 'omniwire-alert:${aid}'; echo '# omniwire-alert:${aid}'; echo '${cronLine.replace(/'/g, "'\\''")}') | crontab -; echo "alert ${alert_id} set (${metric} threshold=${thresh})"`);
+        return ok(nodeId, result.durationMs, result.stdout, `alert set ${alert_id}`);
+      }
+
+      if (action === 'remove') {
+        if (!alert_id) return fail('alert_id required');
+        const aid = alert_id.replace(/'/g, "'\\''");
+        const result = await manager.exec(nodeId, `rm -f ${ad}/${aid}.json; crontab -l 2>/dev/null | grep -v 'omniwire-alert:${aid}' | crontab -; echo "alert ${alert_id} removed"`);
+        return ok(nodeId, result.durationMs, result.stdout, `alert remove ${alert_id}`);
+      }
+
+      if (action === 'test') {
+        if (!alert_id) return fail('alert_id required');
+        const aid = alert_id.replace(/'/g, "'\\''");
+        const ruleResult = await manager.exec(nodeId, `cat ${ad}/${aid}.json 2>/dev/null`);
+        let fireCmd: string;
+        try {
+          const parsed = JSON.parse(ruleResult.stdout);
+          fireCmd = parsed.webhook_url
+            ? `curl -s -X POST '${parsed.webhook_url}' -H 'Content-Type: application/json' -d '{"alert":"${aid}","node":"${nodeId}","test":true}' && echo "test alert sent"`
+            : `mkdir -p ${fd}; echo "$(date -Iseconds) TEST ${aid} ${nodeId}" >> ${fd}/events.log && echo "test alert written to events.log"`;
+        } catch {
+          fireCmd = `mkdir -p ${fd}; echo "$(date -Iseconds) TEST ${aid} ${nodeId}" >> ${fd}/events.log && echo "test alert written to events.log"`;
+        }
+        const result = await manager.exec(nodeId, fireCmd);
+        return ok(nodeId, result.durationMs, result.stdout, `alert test ${alert_id}`);
+      }
+
+      if (action === 'history') {
+        const filterPart = alert_id ? `| grep '${alert_id.replace(/'/g, "'\\''")}'` : '';
+        const result = await manager.exec(nodeId, `cat ${fd}/events.log 2>/dev/null ${filterPart} | tail -30 || echo "(no fired alerts)"`);
+        return ok(nodeId, result.durationMs, result.stdout, 'alert history');
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 42: omniwire_log_aggregate ---
+  server.tool(
+    'omniwire_log_aggregate',
+    'Cross-node log search and aggregation. Run grep/journalctl across all nodes in parallel, merge results with node prefix. Actions: search, tail, count.',
+    {
+      action: z.enum(['search', 'tail', 'count']).describe('search=grep pattern, tail=last N lines, count=count matches per node'),
+      pattern: z.string().optional().describe('Search/grep pattern'),
+      nodes: z.array(z.string()).optional().describe('Nodes to search (default: all online)'),
+      source: z.enum(['journalctl', 'syslog', 'file']).optional().describe('Log source (default: journalctl)'),
+      file_path: z.string().optional().describe('Log file path (required when source=file)'),
+      limit: z.number().optional().describe('Max lines per node (default: 50)'),
+    },
+    async ({ action, pattern, nodes: targetNodes, source, file_path, limit }) => {
+      const logLimit = limit ?? 50;
+      const logSource = source ?? 'journalctl';
+      const nodeIds = targetNodes ?? manager.getOnlineNodes();
+
+      function buildCmd(act: string): string {
+        if (logSource === 'journalctl') {
+          const gp = pattern ? `--grep='${pattern.replace(/'/g, "'\\''")}' ` : '';
+          if (act === 'count') return `journalctl --no-pager ${gp}-q 2>/dev/null | wc -l`;
+          return `journalctl --no-pager -n ${logLimit} ${gp}2>/dev/null`;
+        }
+        if (logSource === 'syslog') {
+          const lf = '/var/log/syslog';
+          if (act === 'count') return pattern
+            ? `grep -cE '${pattern.replace(/'/g, "'\\''")}' ${lf} 2>/dev/null || echo 0`
+            : `wc -l < ${lf} 2>/dev/null || echo 0`;
+          return pattern
+            ? `grep -E '${pattern.replace(/'/g, "'\\''")}' ${lf} 2>/dev/null | tail -${logLimit}`
+            : `tail -${logLimit} ${lf} 2>/dev/null`;
+        }
+        if (!file_path) return "echo '(file_path required for source=file)'";
+        const fp = file_path.replace(/'/g, "'\\''");
+        if (act === 'count') return pattern
+          ? `grep -cE '${pattern.replace(/'/g, "'\\''")}' '${fp}' 2>/dev/null || echo 0`
+          : `wc -l < '${fp}' 2>/dev/null || echo 0`;
+        return pattern
+          ? `grep -E '${pattern.replace(/'/g, "'\\''")}' '${fp}' 2>/dev/null | tail -${logLimit}`
+          : `tail -${logLimit} '${fp}' 2>/dev/null`;
+      }
+
+      const cmd = buildCmd(action);
+      const results = await Promise.all(
+        nodeIds.map(async (id) => ({ ...await manager.exec(id, cmd), nodeId: id }))
+      );
+
+      if (action === 'count') {
+        const lines = results.map((r) => `${r.nodeId.padEnd(12)} ${r.stdout.trim() || '0'}`);
+        return okBrief(lines.join('\n'));
+      }
+
+      return multiResult(results);
+    }
+  );
+
+  // --- Tool 43: omniwire_benchmark ---
+  server.tool(
+    'omniwire_benchmark',
+    'Node performance benchmarking. CPU, memory, disk I/O, and network throughput. Actions: cpu, memory, disk, network, all.',
+    {
+      action: z.enum(['cpu', 'memory', 'disk', 'network', 'all']).describe('"all" runs cpu+memory+disk and returns comparison table across nodes'),
+      node: z.string().optional().describe('Target node (default: all online for cpu/mem/disk/all)'),
+      target_node: z.string().optional().describe('Second node for network test (required for action=network)'),
+    },
+    async ({ action, node, target_node }) => {
+      const cpuCmd = `sysbench cpu --time=5 run 2>&1 | grep 'events per second' || (dd if=/dev/zero bs=1M count=500 2>/dev/null | md5sum | awk '{print "md5-throughput OK"}')`;
+
+      const memCmd = "sysbench memory --time=5 run 2>&1 | grep transferred || (dd if=/dev/zero of=/dev/null bs=1M count=1000 2>&1 | grep -E 'MB/s|GB/s|copied')";
+      const diskCmd = "dd if=/dev/zero of=/tmp/.ow-bench bs=1M count=100 oflag=direct 2>&1 | grep -E 'MB/s|GB/s|copied'; rm -f /tmp/.ow-bench";
+
+      if (action === 'network') {
+        if (!target_node) return fail('target_node required for network benchmark');
+        const srcNode = node ?? 'contabo';
+        const bport = 19876;
+        await manager.exec(target_node, `nc -l -p ${bport} > /dev/null &`);
+        await new Promise((r) => setTimeout(r, 500));
+        const targetInfo = await manager.exec(target_node, "hostname -I | awk '{print $1}'");
+        const targetIp = targetInfo.stdout.trim();
+        if (!targetIp) return fail(`could not resolve IP for ${target_node}`);
+        const sendResult = await manager.exec(srcNode, `dd if=/dev/zero bs=1M count=100 2>/dev/null | nc -w 5 ${targetIp} ${bport} 2>&1 | grep -E 'MB/s|GB/s|copied'; echo "network test: ${srcNode} -> ${target_node}"`);
+        await manager.exec(target_node, `pkill -f 'nc -l -p ${bport}' 2>/dev/null; true`);
+        return ok(srcNode, sendResult.durationMs, sendResult.stdout, `network bench ${srcNode}->${target_node}`);
+      }
+
+      const targetNodes = node ? [node] : manager.getOnlineNodes();
+
+      if (action === 'cpu') {
+        const results = await Promise.all(targetNodes.map(async (id) => ({ ...await manager.exec(id, cpuCmd), nodeId: id })));
+        return multiResult(results);
+      }
+
+      if (action === 'memory') {
+        const results = await Promise.all(targetNodes.map(async (id) => ({ ...await manager.exec(id, memCmd), nodeId: id })));
+        return multiResult(results);
+      }
+
+      if (action === 'disk') {
+        const results = await Promise.all(targetNodes.map(async (id) => ({ ...await manager.exec(id, diskCmd), nodeId: id })));
+        return multiResult(results);
+      }
+
+      const allResults = await Promise.all(targetNodes.map(async (id) => {
+        const [cpuR, memR, diskR] = await Promise.all([
+          manager.exec(id, cpuCmd),
+          manager.exec(id, memCmd),
+          manager.exec(id, diskCmd),
+        ]);
+        const cpuVal = cpuR.stdout.match(/[\d.]+ events per second/)?.[0] ?? cpuR.stdout.split('\n')[0]?.slice(0, 35) ?? '--';
+        const memVal = memR.stdout.match(/[\d.]+ \w+B transferred/)?.[0] ?? memR.stdout.split('\n')[0]?.slice(0, 35) ?? '--';
+        const diskVal = diskR.stdout.match(/[\d.]+ \w+B\/s/)?.[0] ?? diskR.stdout.split('\n')[0]?.slice(0, 25) ?? '--';
+        return `${id.padEnd(12)} cpu: ${cpuVal.padEnd(35)}  mem: ${memVal.padEnd(35)}  disk: ${diskVal}`;
+      }));
+
+      return okBrief(`benchmark results (cpu / mem / disk)\n${allResults.join('\n')}`);
+    }
+  );
+
+  // --- Tool 34: omniwire_clipboard ---
   server.tool(
     'omniwire_clipboard',
     'Copy text between nodes via a shared clipboard buffer.',
@@ -1688,7 +2716,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
   // --- Tool 33: omniwire_store ---
   server.tool(
     'omniwire_store',
-    'Key-value store for chaining results across tool calls in the same session. Agents can store intermediate results and retrieve them later. Keys persist until session ends.',
+    'Key-value store for chaining results. Auto-persists to CyberBase. On get, checks memory first then CyberBase fallback. Keys survive across sessions via CyberBase.',
     {
       action: z.enum(['get', 'set', 'delete', 'list', 'clear']).describe('Action'),
       key: z.string().optional().describe('Key name (required for get/set/delete)'),
@@ -1698,21 +2726,31 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       switch (action) {
         case 'get':
           if (!key) return fail('key required');
-          return okBrief(resultStore.get(key) ?? '(not found)');
+          // Memory first, CyberBase fallback
+          let val = resultStore.get(key);
+          if (!val) { val = await cbGet('store', key) ?? undefined; if (val) resultStore.set(key, val); }
+          return okBrief(val ?? '(not found)');
         case 'set':
           if (!key || value === undefined) return fail('key and value required');
           resultStore.set(key, value);
-          return okBrief(`stored ${key} (${value.length} chars)`);
+          cb('store', key, value);  // persist to CyberBase
+          return okBrief(`stored ${key} (${value.length} chars) [memory + cyberbase]`);
         case 'delete':
           if (!key) return fail('key required');
           resultStore.delete(key);
+          cb('store', key, '');  // mark deleted in CyberBase
           return okBrief(`deleted ${key}`);
-        case 'list':
-          if (resultStore.size === 0) return okBrief('(empty store)');
-          return okBrief([...resultStore.entries()].map(([k, v]) => `${k} = ${v.slice(0, 80)}${v.length > 80 ? '...' : ''}`).join('\n'));
+        case 'list': {
+          // Merge memory + CyberBase keys
+          const memKeys = [...resultStore.entries()].map(([k, v]) => `${k} = ${v.slice(0, 80)}${v.length > 80 ? '...' : ''}`);
+          const cbKeys = await cbList('store');
+          const extra = cbKeys.filter(k => !resultStore.has(k)).map(k => `${k} (cyberbase)`);
+          const all = [...memKeys, ...extra];
+          return okBrief(all.length > 0 ? all.join('\n') : '(empty store)');
+        }
         case 'clear':
           resultStore.clear();
-          return okBrief('store cleared');
+          return okBrief('memory store cleared (CyberBase entries preserved)');
       }
     }
   );
@@ -1861,7 +2899,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
     'omniwire_agent_task',
     'Dispatch a task to a specific node for background execution and retrieve results later. Creates a task file on the node, runs it in background, and provides a task ID for polling. Designed for A2A (agent-to-agent) workflows where one agent dispatches work and another retrieves results.',
     {
-      action: z.enum(['dispatch', 'status', 'result', 'list', 'cancel']).describe('Action'),
+      action: z.enum(['dispatch', 'status', 'result', 'list', 'cancel', 'dlq']).describe('Action. dlq=list tasks that failed (non-zero exit).'),
       node: z.string().optional().describe('Node (default: contabo)'),
       command: z.string().optional().describe('Command to dispatch (for dispatch action)'),
       task_id: z.string().optional().describe('Task ID (for status/result/cancel)'),
@@ -1875,7 +2913,9 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         if (!command) return fail('command required');
         const id = `ow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
         const escaped = command.replace(/'/g, "'\\''");
-        const script = `mkdir -p ${taskDir} && echo 'running' > ${taskDir}/${id}.status && echo '${label ?? command.slice(0, 60)}' > ${taskDir}/${id}.label && (bash -c '${escaped}' > ${taskDir}/${id}.stdout 2> ${taskDir}/${id}.stderr; echo $? > ${taskDir}/${id}.exit; echo 'done' > ${taskDir}/${id}.status) &`;
+        // On non-zero exit, copy task files to DLQ for later inspection
+        const dlqCmd = `mkdir -p ${taskDir}/dlq && cp ${taskDir}/${id}.* ${taskDir}/dlq/ 2>/dev/null`;
+        const script = `mkdir -p ${taskDir} && echo 'running' > ${taskDir}/${id}.status && echo '${label ?? command.slice(0, 60)}' > ${taskDir}/${id}.label && (bash -c '${escaped}' > ${taskDir}/${id}.stdout 2> ${taskDir}/${id}.stderr; _rc=$?; echo $_rc > ${taskDir}/${id}.exit; if [ $_rc -ne 0 ]; then ${dlqCmd}; fi; echo 'done' > ${taskDir}/${id}.status) &`;
         const result = await manager.exec(nodeId, script);
         return result.code === 0
           ? okBrief(`${nodeId} task dispatched: ${id}`)
@@ -1902,6 +2942,11 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         return okBrief(`${nodeId} ${task_id} cancelled`);
       }
 
+      if (action === 'dlq') {
+        const result = await manager.exec(nodeId, `for f in ${taskDir}/dlq/*.status 2>/dev/null; do [ -f "$f" ] || continue; id=$(basename "$f" .status); rc=$(cat ${taskDir}/dlq/$id.exit 2>/dev/null || echo '?'); lbl=$(cat ${taskDir}/dlq/$id.label 2>/dev/null); echo "$id exit=$rc $lbl"; done 2>/dev/null | tail -20 || echo '(empty DLQ)'`);
+        return ok(nodeId, result.durationMs, result.stdout || '(empty DLQ)', 'task DLQ');
+      }
+
       return fail('invalid action/params');
     }
   );
@@ -1917,16 +2962,21 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       message: z.string().optional().describe('Message content (for send). Can be JSON.'),
       sender: z.string().optional().describe('Sender agent name (for send)'),
       count: z.number().optional().describe('Number of messages to receive (default: 1). Messages are dequeued on receive.'),
+      schema: z.enum(['text', 'json', 'any']).optional().describe('Message format validation. json=must be valid JSON, text=plain string, any=no validation (default).'),
     },
-    async ({ action, channel, node, message, sender, count }) => {
+    async ({ action, channel, node, message, sender, count, schema }) => {
       const nodeId = node ?? 'contabo';
       const queueDir = '/tmp/.omniwire-a2a';
 
       if (action === 'send') {
         if (!channel || !message) return fail('channel and message required');
+        // Schema validation
+        if (schema === 'json') {
+          try { JSON.parse(message); } catch { return fail('schema=json but message is not valid JSON'); }
+        }
         const ts = Date.now();
         const id = `${ts}-${Math.random().toString(36).slice(2, 6)}`;
-        const payload = JSON.stringify({ id, ts, sender: sender ?? 'unknown', message });
+        const payload = JSON.stringify({ id, ts, sender: sender ?? 'unknown', schema: schema ?? 'any', message });
         const escaped = payload.replace(/'/g, "'\\''");
         const result = await manager.exec(nodeId, `mkdir -p ${queueDir}/${channel} && echo '${escaped}' >> ${queueDir}/${channel}/queue`);
         return result.code === 0
@@ -2032,8 +3082,9 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       source: z.string().optional().describe('Source agent name (for emit)'),
       since: z.string().optional().describe('Only return events after this timestamp (epoch ms) for poll'),
       limit: z.number().optional().describe('Max events to return (default: 10)'),
+      filter: z.string().optional().describe('Regex filter applied to event data during poll. Only matching events returned.'),
     },
-    async ({ action, topic, node, data, source, since, limit }) => {
+    async ({ action, topic, node, data, source, since, limit, filter }) => {
       const nodeId = node ?? 'contabo';
       const eventDir = '/tmp/.omniwire-events';
       const n = limit ?? 10;
@@ -2056,6 +3107,11 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
           cmd = `awk -F'"ts":' '{split($2,a,","); if(a[1]>${since}) print}' ${eventDir}/events.log 2>/dev/null | tail -${n}`;
         } else {
           cmd = `tail -${n} ${eventDir}/events.log 2>/dev/null || echo '(no events)'`;
+        }
+        // Apply regex filter on event data if specified
+        if (filter) {
+          const escapedFilter = filter.replace(/'/g, "'\\''");
+          cmd = `(${cmd}) | grep -E '${escapedFilter}' 2>/dev/null`;
         }
         const result = await manager.exec(nodeId, cmd);
         return ok(nodeId, result.durationMs, result.stdout || '(no events)', `events ${topic ?? 'all'}`);
@@ -2226,7 +3282,8 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         const entry = JSON.stringify({ ts: Date.now(), author: author ?? 'agent', content });
         const escaped = entry.replace(/'/g, "'\\''");
         await manager.exec(nodeId, `mkdir -p ${bbDir} && echo '${escaped}' >> ${bbDir}/${topic}.log`);
-        return okBrief(`posted to ${topic} (${content.length} chars)`);
+        cb('blackboard', `${topic}:${Date.now()}`, entry);  // persist to CyberBase
+        return okBrief(`posted to ${topic} (${content.length} chars) [node + cyberbase]`);
       }
 
       if (action === 'read') {
@@ -2339,6 +3396,384 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
 
       const results = await manager.execAll(cmd);
       return multiResult(results);
+    }
+  );
+
+  // --- Tool 46: omniwire_snippet ---
+  server.tool(
+    'omniwire_snippet',
+    'Saved command templates on a node. Save reusable snippets with {{var}} placeholders, then run them with variable substitution.',
+    {
+      action: z.enum(['save', 'run', 'list', 'delete']).describe('save=store template, run=execute with var substitution, list=show all, delete=remove'),
+      node: z.string().describe('Target node'),
+      name: z.string().optional().describe('Snippet name (required for save/run/delete)'),
+      command: z.string().optional().describe('Command template for save. Use {{var}} for placeholders.'),
+      vars: z.string().optional().describe('Key=value pairs for run substitution, space-separated. E.g. "host=1.2.3.4 port=8080"'),
+    },
+    async ({ action, node, name, command, vars }) => {
+      const snippetDir = '/tmp/.omniwire-snippets';
+
+      if (action === 'list') {
+        const result = await manager.exec(node, `mkdir -p ${snippetDir} && ls ${snippetDir}/ 2>/dev/null || echo '(no snippets)'`);
+        return ok(node, result.durationMs, result.stdout, 'snippets');
+      }
+
+      if (action === 'save') {
+        if (!name || !command) return fail('name and command required for save');
+        const escaped = command.replace(/'/g, "'\\''");
+        const result = await manager.exec(node, `mkdir -p ${snippetDir} && echo '${escaped}' > ${snippetDir}/${name}.sh && chmod +x ${snippetDir}/${name}.sh`);
+        return result.code === 0
+          ? okBrief(`${node} snippet saved: ${name}`)
+          : fail(`${node} snippet save: ${result.stderr}`);
+      }
+
+      if (action === 'run') {
+        if (!name) return fail('name required for run');
+        const readResult = await manager.exec(node, `cat ${snippetDir}/${name}.sh 2>/dev/null`);
+        if (readResult.code !== 0) return fail(`snippet ${name} not found`);
+
+        let template = readResult.stdout.trim();
+        if (vars) {
+          for (const pair of vars.split(/\s+/)) {
+            const eqIdx = pair.indexOf('=');
+            if (eqIdx < 0) continue;
+            const k = pair.slice(0, eqIdx);
+            const v = pair.slice(eqIdx + 1);
+            template = template.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), v);
+          }
+        }
+
+        const result = await manager.exec(node, template);
+        return ok(node, result.durationMs, fmtExecOutput(result, 30), `snippet:${name}`);
+      }
+
+      if (action === 'delete') {
+        if (!name) return fail('name required for delete');
+        const result = await manager.exec(node, `rm -f ${snippetDir}/${name}.sh`);
+        return result.code === 0
+          ? okBrief(`${node} snippet deleted: ${name}`)
+          : fail(`${node} snippet delete: ${result.stderr}`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 47: omniwire_alias ---
+  server.tool(
+    'omniwire_alias',
+    'In-session command shortcuts. Set short aliases for long commands, then run them by alias name on any node.',
+    {
+      action: z.enum(['set', 'get', 'list', 'delete', 'run']).describe('set=define alias, get=show command, list=all aliases, delete=remove, run=execute alias on node'),
+      name: z.string().optional().describe('Alias name (required for set/get/delete/run)'),
+      command: z.string().optional().describe('Command to alias (for set). Supports {{key}} interpolation.'),
+      node: z.string().optional().describe('Node to run alias on (for run action). Default: contabo.'),
+    },
+    async ({ action, name, command, node }) => {
+      if (action === 'list') {
+        if (aliasStore.size === 0) return okBrief('(no aliases)');
+        return okBrief([...aliasStore.entries()].map(([k, v]) => `${k} = ${v}`).join('\n'));
+      }
+
+      if (action === 'set') {
+        if (!name || !command) return fail('name and command required');
+        aliasStore.set(name, command);
+        return okBrief(`alias set: ${name} = ${command.slice(0, 80)}`);
+      }
+
+      if (action === 'get') {
+        if (!name) return fail('name required');
+        const cmd = aliasStore.get(name);
+        return cmd ? okBrief(`${name} = ${cmd}`) : fail(`alias ${name} not found`);
+      }
+
+      if (action === 'delete') {
+        if (!name) return fail('name required');
+        aliasStore.delete(name);
+        return okBrief(`alias ${name} deleted`);
+      }
+
+      if (action === 'run') {
+        if (!name) return fail('name required');
+        const template = aliasStore.get(name);
+        if (!template) return fail(`alias ${name} not found`);
+        const nodeId = node ?? 'contabo';
+        const resolved = template.replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
+        const result = await manager.exec(nodeId, resolved);
+        return ok(nodeId, result.durationMs, fmtExecOutput(result, 30), `alias:${name}`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 48: omniwire_trace ---
+  server.tool(
+    'omniwire_trace',
+    'Distributed tracing across mesh nodes. Start a trace, record spans with timing, view a waterfall breakdown of where time was spent.',
+    {
+      action: z.enum(['start', 'stop', 'view']).describe('start=create trace, stop=mark complete, view=show all spans with waterfall'),
+      trace_id: z.string().optional().describe('Trace ID (required for stop/view). Returned by start.'),
+      node: z.string().optional().describe('Node where the span ran (for start)'),
+      command: z.string().optional().describe('Command/label for this trace (for start)'),
+    },
+    async ({ action, trace_id, node, command }) => {
+      if (action === 'start') {
+        const id = `tr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const nodeId = node ?? 'local';
+        const startMs = Date.now();
+        const span: TraceSpan = { node: nodeId, command: command ?? 'trace-start', startMs, endMs: startMs, result: 'started' };
+        traceStore.set(id, { spans: [span], startMs, done: false });
+        return okBrief(`trace started: ${id}`);
+      }
+
+      if (action === 'stop') {
+        if (!trace_id) return fail('trace_id required');
+        const trace = traceStore.get(trace_id);
+        if (!trace) return fail(`trace ${trace_id} not found`);
+        traceStore.set(trace_id, { ...trace, done: true });
+        return okBrief(`trace ${trace_id} stopped (${t(Date.now() - trace.startMs)} total)`);
+      }
+
+      if (action === 'view') {
+        if (!trace_id) {
+          if (traceStore.size === 0) return okBrief('(no traces)');
+          const traceList = [...traceStore.entries()].map(([id, tr]) =>
+            `${id}  ${tr.done ? 'done' : 'running'}  ${tr.spans.length} spans  ${t(Date.now() - tr.startMs)}`
+          );
+          return okBrief(traceList.join('\n'));
+        }
+        const trace = traceStore.get(trace_id);
+        if (!trace) return fail(`trace ${trace_id} not found`);
+        const lastSpan = trace.spans[trace.spans.length - 1];
+        const totalMs = (trace.done && lastSpan ? lastSpan.endMs : Date.now()) - trace.startMs || 1;
+        const lines = [`trace ${trace_id}  ${trace.done ? 'done' : 'running'}  total: ${t(totalMs)}`, ''];
+        for (const span of trace.spans) {
+          const spanMs = span.endMs - span.startMs;
+          const startOffset = span.startMs - trace.startMs;
+          const barWidth = Math.max(1, Math.round((spanMs / totalMs) * 40));
+          const padLeft = Math.round((startOffset / totalMs) * 40);
+          const bar = ' '.repeat(padLeft) + '='.repeat(barWidth);
+          lines.push(`${span.node.padEnd(12)} ${t(spanMs).padStart(7)}  |${bar}|  ${span.command.slice(0, 50)}`);
+        }
+        return okBrief(lines.join('\n'));
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 49: omniwire_doctor ---
+  server.tool(
+    'omniwire_doctor',
+    'Full health diagnostic for mesh nodes. Checks SSH connectivity, disk, memory, load, Docker, nftables, WireGuard, required tools, OmniWire version, and CyberBase reachability.',
+    {
+      node: z.string().optional().describe('Target node id. Omit to check all online nodes.'),
+    },
+    async ({ node }) => {
+      const diagnosticCmd = [
+        `disk=$(df / --output=pcent | tail -1 | tr -d ' %'); [ "\${disk}" -lt 80 ] && echo "PASS disk \${disk}%" || { [ "\${disk}" -lt 90 ] && echo "WARN disk \${disk}%" || echo "FAIL disk \${disk}%"; }`,
+        `mem=$(free | awk '/Mem:/{printf "%.0f", $3/$2*100}'); [ "\${mem}" -lt 85 ] && echo "PASS mem \${mem}%" || { [ "\${mem}" -lt 95 ] && echo "WARN mem \${mem}%" || echo "FAIL mem \${mem}%"; }`,
+        `load=$(cat /proc/loadavg | awk '{print $1}'); norm=$(echo "$load" | awk '{printf "%.1f", $1}'); echo "$norm" | awk '{if($1<1.5) print "PASS load " $1; else if($1<4) print "WARN load " $1; else print "FAIL load " $1}'`,
+        `docker info >/dev/null 2>&1 && echo "PASS docker running" || echo "WARN docker not running"`,
+        `nft list tables >/dev/null 2>&1 && echo "PASS nftables loaded" || echo "WARN nftables not loaded"`,
+        `ip link show wg0 >/dev/null 2>&1 && echo "PASS wireguard wg0 up" || echo "WARN wireguard wg0 not found"`,
+        `for tool in curl tar gzip lz4 nc; do command -v $tool >/dev/null 2>&1 && echo "PASS tool:$tool" || echo "FAIL tool:$tool missing"; done`,
+        `omniwire --version >/dev/null 2>&1 && echo "PASS omniwire installed" || echo "WARN omniwire binary not in PATH"`,
+        `timeout 3 bash -c 'echo "" | nc -w2 10.10.0.1 5432' 2>/dev/null && echo "PASS cyberbase reachable" || echo "WARN cyberbase 10.10.0.1:5432 unreachable"`,
+      ].join('; ');
+
+      const targetNodes = node ? [node] : manager.getOnlineNodes();
+      const results = await Promise.all(targetNodes.map(async (n) => {
+        const r = await manager.exec(n, diagnosticCmd);
+        return { ...r, nodeId: n };
+      }));
+
+      const parts = results.map((r) => {
+        if (r.code === -1) return `-- ${r.nodeId}\nFAIL ssh connectivity`;
+        const lines = r.stdout.split('\n').filter(Boolean);
+        const pass = lines.filter((l) => l.startsWith('PASS')).length;
+        const warn = lines.filter((l) => l.startsWith('WARN')).length;
+        const failCount = lines.filter((l) => l.startsWith('FAIL')).length;
+        return `-- ${r.nodeId}  pass=${pass} warn=${warn} fail=${failCount}  ${t(r.durationMs)}\n${lines.join('\n')}`;
+      });
+
+      return okBrief(trim(parts.join('\n\n')));
+    }
+  );
+
+  // --- Tool 50: omniwire_metrics ---
+  server.tool(
+    'omniwire_metrics',
+    'Collect and export Prometheus-compatible metrics from mesh nodes. Scrape returns current values; export formats as Prometheus text exposition.',
+    {
+      action: z.enum(['scrape', 'export']).describe('scrape=collect current metrics, export=Prometheus text format'),
+      node: z.string().optional().describe('Specific node to scrape (default: all online nodes)'),
+    },
+    async ({ action, node }) => {
+      const metricsCmd = [
+        `echo "uptime_seconds=$(cat /proc/uptime | awk '{print int($1)}')"`,
+        `echo "mem_used_pct=$(free | awk '/Mem:/{printf \"%.1f\", $3/$2*100}')"`,
+        `echo "disk_used_pct=$(df / --output=pcent | tail -1 | tr -d ' %')"`,
+        `echo "load_1m=$(cat /proc/loadavg | awk '{print $1}')"`,
+        `echo "tcp_connections=$(ss -s | awk '/TCP:/{print $2}')"`,
+        `echo "docker_containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')"`,
+      ].join('; ');
+
+      const parseMetrics = (raw: string): Record<string, string> =>
+        Object.fromEntries(
+          raw.split('\n').filter(Boolean).map((l) => {
+            const idx = l.indexOf('=');
+            return [l.slice(0, idx), l.slice(idx + 1)] as [string, string];
+          })
+        );
+
+      const targetNodes = node ? [node] : manager.getOnlineNodes();
+      const nodeResults = await Promise.all(targetNodes.map(async (n) => {
+        const start = Date.now();
+        const r = await manager.exec(n, metricsCmd);
+        return { nodeId: n, raw: r.stdout, latencyMs: Date.now() - start, ok: r.code === 0 };
+      }));
+
+      if (action === 'scrape') {
+        const parts = nodeResults.map((r) => {
+          if (!r.ok) return `-- ${r.nodeId}  OFFLINE`;
+          const m = parseMetrics(r.raw);
+          return `-- ${r.nodeId}  lat=${r.latencyMs}ms\n` +
+            `   mem=${m['mem_used_pct'] ?? '--'}%  disk=${m['disk_used_pct'] ?? '--'}%  ` +
+            `load=${m['load_1m'] ?? '--'}  tcp=${m['tcp_connections'] ?? '--'}  ` +
+            `docker=${m['docker_containers'] ?? '--'}  uptime=${m['uptime_seconds'] ?? '--'}s`;
+        });
+        return okBrief(parts.join('\n'));
+      }
+
+      // Prometheus text exposition format
+      const promLines: string[] = [
+        '# HELP omniwire_node_latency_ms SSH round-trip latency in milliseconds',
+        '# TYPE omniwire_node_latency_ms gauge',
+        ...nodeResults.map((r) => `omniwire_node_latency_ms{node="${r.nodeId}"} ${r.latencyMs}`),
+      ];
+      const metricDefs: Array<{ key: string; name: string; help: string; metricType: string }> = [
+        { key: 'mem_used_pct', name: 'omniwire_node_mem_used_pct', help: 'Memory used percentage', metricType: 'gauge' },
+        { key: 'disk_used_pct', name: 'omniwire_node_disk_used_pct', help: 'Disk used percentage on /', metricType: 'gauge' },
+        { key: 'load_1m', name: 'omniwire_node_load_1m', help: '1-minute load average', metricType: 'gauge' },
+        { key: 'tcp_connections', name: 'omniwire_node_tcp_connections', help: 'Total TCP connections', metricType: 'gauge' },
+        { key: 'docker_containers', name: 'omniwire_node_docker_containers', help: 'Running Docker containers', metricType: 'gauge' },
+        { key: 'uptime_seconds', name: 'omniwire_node_uptime_seconds', help: 'Node uptime in seconds', metricType: 'counter' },
+      ];
+      for (const def of metricDefs) {
+        promLines.push(`# HELP ${def.name} ${def.help}`, `# TYPE ${def.name} ${def.metricType}`);
+        for (const r of nodeResults) {
+          if (!r.ok) continue;
+          const val = parseMetrics(r.raw)[def.key];
+          if (val !== undefined) promLines.push(`${def.name}{node="${r.nodeId}"} ${val}`);
+        }
+      }
+      return okBrief(promLines.join('\n'));
+    }
+  );
+
+  // --- Tool 51: omniwire_audit ---
+  server.tool(
+    'omniwire_audit',
+    'View and search the command audit log. All omniwire_exec calls are automatically logged. Supports viewing recent entries, filtering, and computing stats.',
+    {
+      action: z.enum(['view', 'search', 'clear', 'stats']).describe('view=last N entries, search=filter by node/tool/pattern, clear=wipe log, stats=count/duration/error rate'),
+      limit: z.number().optional().describe('Number of entries to show (default 50)'),
+      node_filter: z.string().optional().describe('Filter by node name'),
+      pattern: z.string().optional().describe('Regex pattern to match against command string'),
+    },
+    async ({ action, limit, node_filter, pattern }) => {
+      if (action === 'clear') {
+        auditLog.length = 0;
+        return okBrief('audit log cleared');
+      }
+
+      if (action === 'stats') {
+        if (auditLog.length === 0) return okBrief('audit log empty');
+        const byNode = new Map<string, { count: number; errors: number; totalMs: number }>();
+        for (const entry of auditLog) {
+          const s = byNode.get(entry.node) ?? { count: 0, errors: 0, totalMs: 0 };
+          s.count++;
+          if (entry.code !== 0) s.errors++;
+          s.totalMs += entry.durationMs;
+          byNode.set(entry.node, s);
+        }
+        const statLines = [`audit log: ${auditLog.length} entries`, ''];
+        for (const [n, s] of [...byNode.entries()].sort((a, b) => b[1].count - a[1].count)) {
+          const errRate = ((s.errors / s.count) * 100).toFixed(1);
+          const avgMs = (s.totalMs / s.count).toFixed(0);
+          statLines.push(`${n.padEnd(12)}  calls=${s.count}  errors=${s.errors} (${errRate}%)  avg=${avgMs}ms`);
+        }
+        return okBrief(statLines.join('\n'));
+      }
+
+      let entries = [...auditLog];
+      if (node_filter) entries = entries.filter((e) => e.node === node_filter);
+      if (pattern) {
+        const regex = new RegExp(pattern, 'i');
+        entries = entries.filter((e) => regex.test(e.command));
+      }
+
+      const n = limit ?? 50;
+      const slice = entries.slice(-n);
+      if (slice.length === 0) return okBrief('(no entries)');
+
+      const entryLines = slice.map((e) => {
+        const ts = new Date(e.ts).toISOString().slice(11, 19);
+        const status = e.code === 0 ? 'ok' : `exit ${e.code}`;
+        return `${ts}  ${e.node.padEnd(10)}  ${e.tool.padEnd(6)}  ${status.padEnd(8)}  ${t(e.durationMs).padStart(6)}  ${e.command.slice(0, 60)}`;
+      });
+      return okBrief(entryLines.join('\n'));
+    }
+  );
+
+  // --- Tool 52: omniwire_plugin ---
+  server.tool(
+    'omniwire_plugin',
+    'Plugin system loader. Scan and inspect JS plugin files in /etc/omniwire/plugins/ or ~/.omniwire/plugins/ on any node.',
+    {
+      action: z.enum(['list', 'load', 'unload', 'info']).describe('list=scan plugin dirs, load=mark plugin active (future), unload=mark inactive, info=show plugin header'),
+      node: z.string().optional().describe('Target node (default: contabo)'),
+      plugin_name: z.string().optional().describe('Plugin file name without .js extension (for load/unload/info)'),
+    },
+    async ({ action, node, plugin_name }) => {
+      const nodeId = node ?? 'contabo';
+      const pluginDirs = ['/etc/omniwire/plugins', '~/.omniwire/plugins'];
+
+      if (action === 'list') {
+        const scanCmd = pluginDirs
+          .map((dir) => `[ -d "${dir}" ] && for f in "${dir}"/*.js; do [ -f "$f" ] || continue; name=$(basename "$f" .js); desc=$(head -1 "$f" | sed 's|^// *||;s|^/\\* *||;s| *\\*/$||'); echo "$name  $dir  $desc"; done`)
+          .join('; ');
+        const result = await manager.exec(nodeId, `(${scanCmd}) 2>/dev/null || echo "(no plugins found)"`);
+        return ok(nodeId, result.durationMs, result.stdout || '(no plugins found)', 'plugins');
+      }
+
+      if (action === 'info') {
+        if (!plugin_name) return fail('plugin_name required');
+        const findCmd = pluginDirs.map((dir) => `[ -f "${dir}/${plugin_name}.js" ] && echo "${dir}/${plugin_name}.js"`).join('; ');
+        const pathResult = await manager.exec(nodeId, `(${findCmd}) 2>/dev/null | head -1`);
+        const pluginPath = pathResult.stdout.trim();
+        if (!pluginPath) return fail(`plugin ${plugin_name} not found in plugin dirs`);
+        const result = await manager.exec(nodeId, `head -20 "${pluginPath}"`);
+        return ok(nodeId, result.durationMs, result.stdout, `plugin:${plugin_name}`);
+      }
+
+      if (action === 'load') {
+        if (!plugin_name) return fail('plugin_name required');
+        const findCmd = pluginDirs.map((dir) => `[ -f "${dir}/${plugin_name}.js" ] && echo "${dir}/${plugin_name}.js"`).join('; ');
+        const pathResult = await manager.exec(nodeId, `(${findCmd}) 2>/dev/null | head -1`);
+        const pluginPath = pathResult.stdout.trim();
+        if (!pluginPath) return fail(`plugin ${plugin_name} not found`);
+        return okBrief(`plugin ${plugin_name} located at ${pluginPath} — dynamic load pending runtime support`);
+      }
+
+      if (action === 'unload') {
+        if (!plugin_name) return fail('plugin_name required');
+        return okBrief(`plugin ${plugin_name} unloaded (in-memory only — no persistent state)`);
+      }
+
+      return fail('invalid action');
     }
   );
 
