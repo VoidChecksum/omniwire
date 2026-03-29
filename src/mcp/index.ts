@@ -67,7 +67,7 @@ async function main(): Promise<void> {
       const engine = new SyncEngine(syncDb, config, manager, transfer);
 
       registerSyncTools(server, syncDb, engine, manifests, nodeId, manager, transfer);
-      log('CyberSync: 12 tools registered', { tools: 12, node: nodeId });
+      log('CyberSync: 17 tools registered', { tools: 17, node: nodeId });
     } catch (err) {
       log(`CyberSync init failed (continuing without sync): ${(err as Error).message}`, { error: (err as Error).message });
     }

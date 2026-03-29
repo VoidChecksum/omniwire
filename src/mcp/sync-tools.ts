@@ -1,4 +1,4 @@
-// CyberSync — 8 MCP tools for sync status, control, and knowledge queries
+// CyberSync — MCP tools for sync status, control, knowledge, and bi-directional sync
 
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -340,6 +340,369 @@ export function registerSyncTools(
         }
         default:
           return { content: [{ type: 'text', text: 'Unknown action: ' + action }] };
+      }
+    }
+  );
+
+  // --- Tool: omniwire_sync ---
+  server.tool(
+    'omniwire_sync',
+    'Bi-directional sync of rules, hooks, memory, agent configs, and settings across all mesh nodes. Syncs Claude Code, OpenClaw, and all AI tool configs.',
+    {
+      action: z.enum(['full', 'push', 'pull', 'status', 'diff', 'watch']).describe(
+        'full=bi-directional reconcile, push=local→all nodes, pull=remote→local, status=sync health, diff=show differences, watch=start file watcher'
+      ),
+      tool: z.string().optional().describe(`Filter by tool: ${ALL_TOOLS.join(', ')}`),
+      category: z.string().optional().describe('Filter by category: rules, hooks, memory, agents, settings, skills, config'),
+      nodes: z.array(z.string()).optional().describe('Target nodes (default: all online)'),
+      dry_run: z.boolean().optional().describe('Preview changes without applying'),
+    },
+    async ({ action, tool, category, nodes: targetNodes, dry_run }) => {
+      const filteredManifests = tool
+        ? manifests.filter((m) => m.tool === tool)
+        : manifests;
+
+      switch (action) {
+        case 'full': {
+          if (dry_run) {
+            const diffs = await engine.getDiff(filteredManifests);
+            const filtered = category
+              ? diffs.filter((d) => d.relPath.startsWith(category + '/'))
+              : diffs;
+            return { content: [{ type: 'text', text: `[DRY RUN] ${filtered.length} items would sync:\n${filtered.map((d) => `  [${d.direction}] ${d.tool}:${d.relPath}`).join('\n')}` }] };
+          }
+          const result = await engine.reconcile(filteredManifests);
+          return { content: [{ type: 'text', text: `Bi-directional sync complete: pushed=${result.pushed}, pulled=${result.pulled}, conflicts=${result.conflicts}` }] };
+        }
+        case 'push': {
+          const diffs = await engine.getDiff(filteredManifests);
+          const pushable = diffs.filter((d) => d.direction === 'push');
+          const filtered = category
+            ? pushable.filter((d) => d.relPath.startsWith(category + '/'))
+            : pushable;
+          if (dry_run) {
+            return { content: [{ type: 'text', text: `[DRY RUN] Would push ${filtered.length} items:\n${filtered.map((d) => `  ${d.tool}:${d.relPath}`).join('\n')}` }] };
+          }
+          let pushed = 0;
+          for (const d of filtered) {
+            const m = filteredManifests.find((mm) => mm.tool === d.tool);
+            if (!m) continue;
+            try {
+              await engine.pushFile(d.tool, d.relPath, `${m.baseDir}/${d.relPath}`);
+              pushed++;
+            } catch { /* skip failed items */ }
+          }
+          return { content: [{ type: 'text', text: `Pushed ${pushed}/${filtered.length} items to all nodes.` }] };
+        }
+        case 'pull': {
+          const pulled = await engine.pullPending();
+          return { content: [{ type: 'text', text: `Pulled ${pulled} items from remote nodes.` }] };
+        }
+        case 'status': {
+          const heartbeats = await db.getHeartbeats();
+          const counts = await db.getItemCounts();
+          const diffs = await engine.getDiff(filteredManifests);
+          const lines = [
+            `Nodes: ${heartbeats.length} | Items synced: ${counts.reduce((a, c) => a + c.count, 0)} | Pending: ${diffs.length}`,
+            '',
+            ...heartbeats.map((hb) => `  ${hb.nodeId}: seen=${hb.lastSeen.toISOString().slice(0, 19)}, items=${hb.itemsCount}, pending=${hb.pendingSync}`),
+          ];
+          if (category) {
+            const catDiffs = diffs.filter((d) => d.relPath.startsWith(category + '/'));
+            lines.push('', `Category '${category}': ${catDiffs.length} pending`);
+          }
+          return { content: [{ type: 'text', text: lines.join('\n') }] };
+        }
+        case 'diff': {
+          const diffs = await engine.getDiff(filteredManifests);
+          const filtered = category
+            ? diffs.filter((d) => d.relPath.startsWith(category + '/'))
+            : diffs;
+          if (filtered.length === 0) {
+            return { content: [{ type: 'text', text: 'All in sync. No differences.' }] };
+          }
+          const lines = filtered.map((d) =>
+            `[${d.direction}] ${d.tool}:${d.relPath} (local=${d.localHash?.slice(0, 8) ?? 'missing'}, remote=${d.remoteHash.slice(0, 8)})`
+          );
+          return { content: [{ type: 'text', text: `${filtered.length} differences:\n${lines.join('\n')}` }] };
+        }
+        case 'watch': {
+          return { content: [{ type: 'text', text: 'File watcher is managed by the sync engine background loop. Reconcile interval: 2 minutes.' }] };
+        }
+        default:
+          return { content: [{ type: 'text', text: `Unknown action: ${action}` }] };
+      }
+    }
+  );
+
+  // --- Tool: omniwire_sync_rules ---
+  server.tool(
+    'omniwire_sync_rules',
+    'Sync Claude Code rules (CLAUDE.md, rules/*.md, hooks/*) bi-directionally across all mesh nodes. Push local rules to all nodes or pull latest from remote.',
+    {
+      action: z.enum(['sync', 'push', 'pull', 'diff', 'list']).describe(
+        'sync=bi-directional, push=local→remote, pull=remote→local, diff=show changes, list=show tracked rules'
+      ),
+      nodes: z.array(z.string()).optional().describe('Target nodes (default: all online)'),
+    },
+    async ({ action, nodes: targetNodes }) => {
+      const ruleManifests = manifests.filter((m) => m.tool === 'claude-code');
+
+      switch (action) {
+        case 'sync': {
+          const result = await engine.reconcile(ruleManifests);
+          return { content: [{ type: 'text', text: `Rules sync: pushed=${result.pushed}, pulled=${result.pulled}, conflicts=${result.conflicts}` }] };
+        }
+        case 'push': {
+          const diffs = await engine.getDiff(ruleManifests);
+          const rules = diffs.filter((d) =>
+            d.relPath.startsWith('rules/') || d.relPath.startsWith('hooks/') || d.relPath === 'CLAUDE.md'
+          );
+          let pushed = 0;
+          for (const d of rules) {
+            const m = ruleManifests.find((mm) => mm.tool === d.tool);
+            if (!m) continue;
+            try {
+              await engine.pushFile(d.tool, d.relPath, `${m.baseDir}/${d.relPath}`);
+              pushed++;
+            } catch { /* skip failed */ }
+          }
+          return { content: [{ type: 'text', text: `Pushed ${pushed} rule/hook files to all nodes.` }] };
+        }
+        case 'pull': {
+          const pulled = await engine.pullPending();
+          return { content: [{ type: 'text', text: `Pulled ${pulled} items (including rules/hooks) from remote.` }] };
+        }
+        case 'diff': {
+          const diffs = await engine.getDiff(ruleManifests);
+          const rules = diffs.filter((d) =>
+            d.relPath.startsWith('rules/') || d.relPath.startsWith('hooks/') || d.relPath === 'CLAUDE.md'
+          );
+          if (rules.length === 0) {
+            return { content: [{ type: 'text', text: 'All rules and hooks in sync.' }] };
+          }
+          const lines = rules.map((d) =>
+            `[${d.direction}] ${d.relPath} (local=${d.localHash?.slice(0, 8) ?? 'missing'}, remote=${d.remoteHash.slice(0, 8)})`
+          );
+          return { content: [{ type: 'text', text: `${rules.length} rule/hook differences:\n${lines.join('\n')}` }] };
+        }
+        case 'list': {
+          const items = await db.getItemsByTool('claude-code');
+          const rules = items.filter((i) =>
+            i.relPath.startsWith('rules/') || i.relPath.startsWith('hooks/') || i.relPath === 'CLAUDE.md'
+          );
+          if (rules.length === 0) {
+            return { content: [{ type: 'text', text: 'No rules/hooks tracked in sync database.' }] };
+          }
+          const lines = rules.map((i) =>
+            `  ${i.relPath} (hash=${i.contentHash.slice(0, 8)}, node=${i.updatedByNode}, updated=${i.updatedAt.toISOString().slice(0, 19)})`
+          );
+          return { content: [{ type: 'text', text: `${rules.length} tracked rules/hooks:\n${lines.join('\n')}` }] };
+        }
+        default:
+          return { content: [{ type: 'text', text: `Unknown action: ${action}` }] };
+      }
+    }
+  );
+
+  // --- Tool: omniwire_sync_hooks ---
+  server.tool(
+    'omniwire_sync_hooks',
+    'Sync Claude Code hooks (hooks/*) bi-directionally across all mesh nodes.',
+    {
+      action: z.enum(['sync', 'push', 'pull', 'diff', 'list']).describe(
+        'sync=bi-directional, push=local→remote, pull=remote→local, diff=show changes, list=show tracked hooks'
+      ),
+    },
+    async ({ action }) => {
+      const ccManifests = manifests.filter((m) => m.tool === 'claude-code');
+
+      switch (action) {
+        case 'sync': {
+          const result = await engine.reconcile(ccManifests);
+          return { content: [{ type: 'text', text: `Hooks sync: pushed=${result.pushed}, pulled=${result.pulled}, conflicts=${result.conflicts}` }] };
+        }
+        case 'push': {
+          const diffs = await engine.getDiff(ccManifests);
+          const hooks = diffs.filter((d) => d.relPath.startsWith('hooks/'));
+          let pushed = 0;
+          for (const d of hooks) {
+            const m = ccManifests.find((mm) => mm.tool === d.tool);
+            if (!m) continue;
+            try {
+              await engine.pushFile(d.tool, d.relPath, `${m.baseDir}/${d.relPath}`);
+              pushed++;
+            } catch { /* skip */ }
+          }
+          return { content: [{ type: 'text', text: `Pushed ${pushed} hook files to all nodes.` }] };
+        }
+        case 'pull': {
+          const pulled = await engine.pullPending();
+          return { content: [{ type: 'text', text: `Pulled ${pulled} items (including hooks) from remote.` }] };
+        }
+        case 'diff': {
+          const diffs = await engine.getDiff(ccManifests);
+          const hooks = diffs.filter((d) => d.relPath.startsWith('hooks/'));
+          if (hooks.length === 0) {
+            return { content: [{ type: 'text', text: 'All hooks in sync.' }] };
+          }
+          const lines = hooks.map((d) =>
+            `[${d.direction}] ${d.relPath} (local=${d.localHash?.slice(0, 8) ?? 'missing'}, remote=${d.remoteHash.slice(0, 8)})`
+          );
+          return { content: [{ type: 'text', text: `${hooks.length} hook differences:\n${lines.join('\n')}` }] };
+        }
+        case 'list': {
+          const items = await db.getItemsByTool('claude-code');
+          const hooks = items.filter((i) => i.relPath.startsWith('hooks/'));
+          if (hooks.length === 0) {
+            return { content: [{ type: 'text', text: 'No hooks tracked.' }] };
+          }
+          const lines = hooks.map((i) =>
+            `  ${i.relPath} (hash=${i.contentHash.slice(0, 8)}, node=${i.updatedByNode}, updated=${i.updatedAt.toISOString().slice(0, 19)})`
+          );
+          return { content: [{ type: 'text', text: `${hooks.length} tracked hooks:\n${lines.join('\n')}` }] };
+        }
+        default:
+          return { content: [{ type: 'text', text: `Unknown action: ${action}` }] };
+      }
+    }
+  );
+
+  // --- Tool: omniwire_sync_memory ---
+  server.tool(
+    'omniwire_sync_memory',
+    'Sync Claude Code memory files (memory/*) bi-directionally across all mesh nodes.',
+    {
+      action: z.enum(['sync', 'push', 'pull', 'diff', 'list']).describe(
+        'sync=bi-directional, push=local→remote, pull=remote→local, diff=show changes, list=show tracked memory files'
+      ),
+    },
+    async ({ action }) => {
+      const ccManifests = manifests.filter((m) => m.tool === 'claude-code');
+
+      switch (action) {
+        case 'sync': {
+          const result = await engine.reconcile(ccManifests);
+          return { content: [{ type: 'text', text: `Memory sync: pushed=${result.pushed}, pulled=${result.pulled}, conflicts=${result.conflicts}` }] };
+        }
+        case 'push': {
+          const diffs = await engine.getDiff(ccManifests);
+          const mem = diffs.filter((d) => d.relPath.startsWith('memory/'));
+          let pushed = 0;
+          for (const d of mem) {
+            const m = ccManifests.find((mm) => mm.tool === d.tool);
+            if (!m) continue;
+            try {
+              await engine.pushFile(d.tool, d.relPath, `${m.baseDir}/${d.relPath}`);
+              pushed++;
+            } catch { /* skip */ }
+          }
+          return { content: [{ type: 'text', text: `Pushed ${pushed} memory files to all nodes.` }] };
+        }
+        case 'pull': {
+          const pulled = await engine.pullPending();
+          return { content: [{ type: 'text', text: `Pulled ${pulled} items (including memory) from remote.` }] };
+        }
+        case 'diff': {
+          const diffs = await engine.getDiff(ccManifests);
+          const mem = diffs.filter((d) => d.relPath.startsWith('memory/'));
+          if (mem.length === 0) {
+            return { content: [{ type: 'text', text: 'All memory files in sync.' }] };
+          }
+          const lines = mem.map((d) =>
+            `[${d.direction}] ${d.relPath} (local=${d.localHash?.slice(0, 8) ?? 'missing'}, remote=${d.remoteHash.slice(0, 8)})`
+          );
+          return { content: [{ type: 'text', text: `${mem.length} memory differences:\n${lines.join('\n')}` }] };
+        }
+        case 'list': {
+          const items = await db.getItemsByTool('claude-code');
+          const mem = items.filter((i) => i.relPath.startsWith('memory/'));
+          if (mem.length === 0) {
+            return { content: [{ type: 'text', text: 'No memory files tracked.' }] };
+          }
+          const lines = mem.map((i) =>
+            `  ${i.relPath} (hash=${i.contentHash.slice(0, 8)}, node=${i.updatedByNode}, updated=${i.updatedAt.toISOString().slice(0, 19)})`
+          );
+          return { content: [{ type: 'text', text: `${mem.length} tracked memory files:\n${lines.join('\n')}` }] };
+        }
+        default:
+          return { content: [{ type: 'text', text: `Unknown action: ${action}` }] };
+      }
+    }
+  );
+
+  // --- Tool: omniwire_sync_agents ---
+  server.tool(
+    'omniwire_sync_agents',
+    'Sync agent configs (agents/*, skills/*) for Claude Code, OpenClaw, and other AI tools across all mesh nodes.',
+    {
+      action: z.enum(['sync', 'push', 'pull', 'diff', 'list']).describe(
+        'sync=bi-directional, push=local→remote, pull=remote→local, diff=show changes, list=show tracked agents'
+      ),
+      tool: z.string().optional().describe(`Filter by tool: ${ALL_TOOLS.join(', ')}`),
+    },
+    async ({ action, tool }) => {
+      const filtered = tool
+        ? manifests.filter((m) => m.tool === tool)
+        : manifests;
+
+      switch (action) {
+        case 'sync': {
+          const result = await engine.reconcile(filtered);
+          return { content: [{ type: 'text', text: `Agent sync: pushed=${result.pushed}, pulled=${result.pulled}, conflicts=${result.conflicts}` }] };
+        }
+        case 'push': {
+          const diffs = await engine.getDiff(filtered);
+          const agents = diffs.filter((d) =>
+            d.relPath.startsWith('agents/') || d.relPath.startsWith('skills/')
+          );
+          let pushed = 0;
+          for (const d of agents) {
+            const m = filtered.find((mm) => mm.tool === d.tool);
+            if (!m) continue;
+            try {
+              await engine.pushFile(d.tool, d.relPath, `${m.baseDir}/${d.relPath}`);
+              pushed++;
+            } catch { /* skip */ }
+          }
+          return { content: [{ type: 'text', text: `Pushed ${pushed} agent/skill files to all nodes.` }] };
+        }
+        case 'pull': {
+          const pulled = await engine.pullPending();
+          return { content: [{ type: 'text', text: `Pulled ${pulled} items (including agents/skills) from remote.` }] };
+        }
+        case 'diff': {
+          const diffs = await engine.getDiff(filtered);
+          const agents = diffs.filter((d) =>
+            d.relPath.startsWith('agents/') || d.relPath.startsWith('skills/')
+          );
+          if (agents.length === 0) {
+            return { content: [{ type: 'text', text: 'All agents/skills in sync.' }] };
+          }
+          const lines = agents.map((d) =>
+            `[${d.direction}] ${d.tool}:${d.relPath} (local=${d.localHash?.slice(0, 8) ?? 'missing'}, remote=${d.remoteHash.slice(0, 8)})`
+          );
+          return { content: [{ type: 'text', text: `${agents.length} agent/skill differences:\n${lines.join('\n')}` }] };
+        }
+        case 'list': {
+          const allItems: { tool: string; relPath: string; contentHash: string; updatedByNode: string; updatedAt: Date }[] = [];
+          for (const m of filtered) {
+            const items = await db.getItemsByTool(m.tool);
+            const agents = items.filter((i) =>
+              i.relPath.startsWith('agents/') || i.relPath.startsWith('skills/')
+            );
+            allItems.push(...agents);
+          }
+          if (allItems.length === 0) {
+            return { content: [{ type: 'text', text: 'No agents/skills tracked.' }] };
+          }
+          const lines = allItems.map((i) =>
+            `  ${i.tool}:${i.relPath} (hash=${i.contentHash.slice(0, 8)}, node=${i.updatedByNode})`
+          );
+          return { content: [{ type: 'text', text: `${allItems.length} tracked agents/skills:\n${lines.join('\n')}` }] };
+        }
+        default:
+          return { content: [{ type: 'text', text: `Unknown action: ${action}` }] };
       }
     }
   );

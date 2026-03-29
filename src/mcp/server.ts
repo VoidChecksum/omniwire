@@ -27,7 +27,7 @@ import {
 // -- Output helpers -- compact, scannable output for AI agents ----------------
 type McpResult = { content: [{ type: 'text'; text: string }] };
 
-const MAX_OUTPUT = 4000;
+const MAX_OUTPUT = 16000;
 
 function t(ms: number): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
@@ -47,9 +47,9 @@ function trim(s: string): string {
 
   // Detect table-like output — show header + tail
   const lines = s.split('\n');
-  if (lines.length > 30) {
-    const header = lines.slice(0, 2).join('\n');
-    const lastLines = lines.slice(-5).join('\n');
+  if (lines.length > 200) {
+    const header = lines.slice(0, 5).join('\n');
+    const lastLines = lines.slice(-10).join('\n');
     return header + '\n...\n' + lastLines + `\n(${lines.length} lines total)`;
   }
 
