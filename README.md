@@ -8,9 +8,9 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0D1117" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP_Tools-75+-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
+  <img src="https://img.shields.io/badge/MCP_Tools-81-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
   <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&labelColor=0D1117" alt="A2A" />
-  <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
+  <img src="https://img.shields.io/badge/Latency-~81ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
   <img src="https://img.shields.io/badge/CyberBase-Sync-CC93E6?style=for-the-badge&labelColor=0D1117" alt="cyberbase" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/GPL--3.0-license-8B949E?style=for-the-badge&labelColor=0D1117" alt="license" /></a>
 </p>
@@ -19,7 +19,7 @@
 
 **The infrastructure layer for AI agent swarms.**
 
-75+ MCP tools · A2A protocol · VPN routing · nftables firewall · CDP browser · cookie sync · CyberBase persistence
+81 MCP tools · A2A protocol · OmniMesh VPN · nftables firewall · CDP browser · cookie sync · CyberBase persistence
 
 </div>
 
@@ -214,7 +214,7 @@ graph TB
         direction TB
         MCP["MCP Protocol Layer<br/>stdio | SSE | REST"]
 
-        subgraph tools["75+ Tools"]
+        subgraph tools["81 Tools"]
             direction LR
             EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline  bg"]
             AGENT["Agentic<br/>store  watch  task<br/>a2a  events  locks"]
@@ -295,7 +295,7 @@ omniwire_workflow     reusable named DAGs
 
 ### Adaptive File Transfer
 ```
- < 10 MB   SFTP         native, 80ms
+ < 10 MB   SFTP         native, 81ms
  10M-1GB   netcat+LZ4   compressed, 100ms
  > 1 GB    aria2c       16-parallel, max speed
 ```
@@ -348,7 +348,7 @@ watch(assert="ready")       poll until
 
 ---
 
-## All 75+ Tools
+## All 81 Tools
 
 > **Every tool** supports `background: true` -- returns a task ID immediately. Poll with `omniwire_bg`.
 
@@ -455,6 +455,11 @@ watch(assert="ready")       poll until
 | `omniwire_metrics` | Prometheus-compatible metrics. Scrape/export node stats. |
 | `omniwire_audit` | Command audit log. View/search/stats on all executed commands. |
 | `omniwire_plugin` | Plugin system. List/load plugins from `~/.omniwire/plugins/`. |
+| `omniwire_omnimesh` | OmniMesh — built-in WireGuard mesh manager. Init/up/down/add-peer/sync-peers/health/rotate-keys/topology across all OS. |
+| `omniwire_mesh_expose` | Expose localhost-bound services to the entire mesh. Discover/expose/unexpose/expose-remote. |
+| `omniwire_mesh_gateway` | Auto-expose all localhost services mesh-wide. Sync/teardown/add-rule/remove-rule. |
+| `omniwire_events` | Event bus with Webhook + WebSocket + SSE. Publish events, manage webhooks, query log. |
+| `omniwire_knowledge` | CyberBase knowledge CRUD + text/semantic search + health + vacuum + bulk-set + export. |
 
 ### CyberSync (9)
 
@@ -477,7 +482,7 @@ watch(assert="ready")       poll until
 
 | Operation | Latency | Optimization |
 |-----------|---------|-------------|
-| **Command exec** | **~80ms** | AES-128-GCM cipher, persistent SSH2, zero-fork `:` ping |
+| **Command exec** | **~81ms** | AES-128-GCM cipher, persistent SSH2, zero-fork `:` ping |
 | **Mesh status** | **~100ms** | Parallel probes, 5s cache, single `/proc` read |
 | **File read (<1MB)** | **~60ms** | SFTP-first (skips `cat` fork) |
 | **Transfer (10MB)** | **~120ms** | LZ4 compression (10x faster than gzip) |
@@ -553,7 +558,7 @@ Create `~/.omniwire/mesh.json`:
 ## Changelog
 
 <details>
-<summary><b>v3.0.0 -- 75+ Tools, CyberBase Persistence, Full Platform</b></summary>
+<summary><b>v3.0.0 -- 81 Tools, CyberBase Persistence, Full Platform</b></summary>
 
 **19 new tools**: proxy, dns, backup, container, cert, user, schedule, alert, log_aggregate, benchmark, snippet, alias, trace, doctor, metrics, audit, plugin, cookies, cdp.
 
@@ -592,7 +597,7 @@ Create `~/.omniwire/mesh.json`:
 <details>
 <summary><b>v2.5.1 -- Universal Background Dispatch</b></summary>
 
-**`background: true`** auto-injected into all 75+ tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
+**`background: true`** auto-injected into all 81 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
 
 </details>
 
@@ -631,7 +636,7 @@ Security fixes, multi-path SSH failover, CyberBase integration, VaultBridge Obsi
 ```
 omniwire/
   src/
-    mcp/           MCP server (75+ tools, 3 transports)
+    mcp/           MCP server (81 tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
     sync/          CyberSync + CyberBase (PostgreSQL, Obsidian, encryption)
     protocol/      Mesh config, types, path parsing

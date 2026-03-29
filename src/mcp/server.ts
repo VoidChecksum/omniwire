@@ -13,8 +13,14 @@ import { ShellManager, kernelExec } from '../nodes/shell.js';
 import { RealtimeChannel } from '../nodes/realtime.js';
 import { TunnelManager } from '../nodes/tunnel.js';
 import { openBrowser } from '../commands/browser.js';
-import { allNodes, remoteNodes, findNode, NODE_ROLES, getDefaultNodeForTask } from '../protocol/config.js';
+import { allNodes, remoteNodes, findNode, NODE_ROLES, getDefaultNodeForTask, CONFIG } from '../protocol/config.js';
 import { parseMeshPath } from '../protocol/paths.js';
+import {
+  genKeysCmd, parseKeys, buildWgConfig, wgConfigPath, bringUpCmd, bringDownCmd,
+  statusCmd as meshStatusCmd, parseWgShow, addPeerCmd, removePeerCmd, installCmd,
+  checkInstalledCmd, natTraversalPostUp, natTraversalPostDown, rotateKeyCmd,
+  healthCheckCmd, stunDiscoverCmd, generateMeshTopology, detectOS,
+} from '../mesh/omnimesh.js';
 
 // -- Output helpers -- compact, scannable output for AI agents ----------------
 type McpResult = { content: [{ type: 'text'; text: string }] };
@@ -217,27 +223,66 @@ function cbInit(mgr: NodeManager) { cbManager = mgr; }
 /** psql helper — all DB calls have 5s statement_timeout to prevent hangs */
 const pgExec = (sql: string) => `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "SET statement_timeout='5s'; ${sql}" 2>/dev/null`;
 
+// CyberBase health tracking
+let cbHealthy = true;
+let cbFailCount = 0;
+let cbLastError = '';
+const CB_MAX_FAILS = 5;           // Circuit breaker: pause after N consecutive fails
+const CB_RECOVERY_MS = 30_000;    // Try again after 30s
+let cbRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cbCircuitOpen(): boolean {
+  if (cbFailCount >= CB_MAX_FAILS && cbHealthy) {
+    cbHealthy = false;
+    cbRecoveryTimer = setTimeout(() => { cbHealthy = true; cbFailCount = 0; }, CB_RECOVERY_MS);
+    if (cbRecoveryTimer && 'unref' in cbRecoveryTimer) cbRecoveryTimer.unref();
+  }
+  return !cbHealthy;
+}
+
+function cbRecordSuccess(): void { cbFailCount = 0; cbHealthy = true; }
+function cbRecordFail(err: string): void { cbFailCount++; cbLastError = err; }
+
+/** Safely escape SQL values — defense in depth beyond '' escaping */
+function sqlEscape(val: string): string {
+  return val.replace(/'/g, "''").replace(/\\/g, '\\\\').replace(/\0/g, '');
+}
+
 /** Fire-and-forget write to CyberBase. Never blocks, never throws. */
 function cb(category: string, key: string, value: string) {
-  if (!cbManager) return;
-  const valEsc = value.replace(/'/g, "''").slice(0, 50000);
-  const keyEsc = `${category}:${key}`.replace(/'/g, "''");
+  if (!cbManager || cbCircuitOpen()) return;
+  const valEsc = sqlEscape(value).slice(0, 50000);
+  const keyEsc = sqlEscape(`${category}:${key}`);
   const sql = `INSERT INTO knowledge (source_tool, key, value, updated_at) VALUES ('omniwire', '${keyEsc}', jsonb_build_object('data', '${valEsc}'), NOW()) ON CONFLICT (source_tool, key) DO UPDATE SET value = jsonb_build_object('data', '${valEsc}'), updated_at = NOW();`;
   CB_QUEUE.push(sql);
   if (!cbDraining) drainCb();
 }
 
-/** Batch-drain CyberBase write queue (max 10 per flush, 5s timeout) */
+/** Batch-drain CyberBase write queue (max 10 per flush, retry on fail) */
 async function drainCb() {
-  if (!cbManager || CB_QUEUE.length === 0) { cbDraining = false; return; }
+  if (!cbManager || CB_QUEUE.length === 0 || cbCircuitOpen()) { cbDraining = false; return; }
   cbDraining = true;
   const batch = CB_QUEUE.splice(0, 10);
   const combined = batch.join(' ');
   try {
-    await cbManager.exec('contabo', pgExec(combined));
-  } catch { /* never fail */ }
-  if (CB_QUEUE.length > 0) setTimeout(drainCb, 100);
+    const r = await cbManager.exec('contabo', pgExec(combined));
+    if (r.code === 0 || r.stdout.includes('INSERT') || r.stdout.includes('UPDATE')) {
+      cbRecordSuccess();
+    } else {
+      cbRecordFail(r.stderr || 'unknown error');
+      // Re-queue failed batch (once only, don't infinite loop)
+      if (cbFailCount < CB_MAX_FAILS) CB_QUEUE.unshift(...batch);
+    }
+  } catch (e) {
+    cbRecordFail((e as Error).message);
+  }
+  if (CB_QUEUE.length > 0 && !cbCircuitOpen()) setTimeout(drainCb, 100);
   else cbDraining = false;
+}
+
+/** Get CyberBase health status */
+function getCbHealth(): { healthy: boolean; failCount: number; lastError: string; queueSize: number } {
+  return { healthy: cbHealthy, failCount: cbFailCount, lastError: cbLastError, queueSize: CB_QUEUE.length };
 }
 
 /** Read from CyberBase knowledge table. Returns value or null. */
@@ -768,16 +813,17 @@ tags: ${meshNode.tags.join(', ')}`;
   // --- Tool 17: omniwire_port_forward ---
   server.tool(
     'omniwire_port_forward',
-    'Create an SSH port forward tunnel to a node.',
+    'Create SSH port forward tunnels to mesh nodes. Supports mesh-wide exposure: any tunnel can be made accessible to all mesh nodes via wg0 binding. Actions: create, list, close, mesh-expose (forward + expose to mesh).',
     {
       node: z.string().describe('Node to tunnel to'),
       local_port: z.number().describe('Local port'),
       remote_port: z.number().describe('Remote port'),
       remote_host: z.string().optional().describe('Remote host (default: 127.0.0.1)'),
-      action: z.enum(['create', 'list', 'close']).optional().describe('Action (default: create)'),
+      action: z.enum(['create', 'list', 'close', 'mesh-expose']).optional().describe('Action (default: create). mesh-expose = create tunnel + socat expose to mesh'),
       tunnel_id: z.string().optional().describe('Tunnel ID (for close action)'),
+      mesh_bind: z.enum(['mesh', 'all']).optional().describe('For mesh-expose: mesh=wg0 IP only (default), all=0.0.0.0'),
     },
-    async ({ node, local_port, remote_port, remote_host, action, tunnel_id }) => {
+    async ({ node, local_port, remote_port, remote_host, action, tunnel_id, mesh_bind }) => {
       const act = action ?? 'create';
       if (act === 'list') {
         const list = tunnels.list();
@@ -787,6 +833,25 @@ tags: ${meshNode.tags.join(', ')}`;
       if (act === 'close' && tunnel_id) {
         tunnels.close(tunnel_id);
         return okBrief(`closed ${tunnel_id}`);
+      }
+      if (act === 'mesh-expose') {
+        // Create tunnel + socat expose to mesh in one step
+        try {
+          const info = await tunnels.create(node, local_port, remote_port, remote_host);
+          // Also start socat on the local machine to expose tunnel port to mesh
+          const bindAddr = mesh_bind === 'all' ? '0.0.0.0' : '$(ip -4 addr show wg0 2>/dev/null | grep -oP "inet \\K[0-9.]+" || echo "0.0.0.0")';
+          const id = `mesh-fwd-${info.id}`;
+          const stateDir = '/tmp/.omniwire-mesh-expose';
+          const localNode = CONFIG.nodes.find((n) => n.isLocal)?.id ?? 'windows';
+          if (localNode === 'windows') {
+            // On Windows, the tunnel itself is enough — mesh nodes reach Windows via wg0
+            return okBrief(`tunnel ${info.id}  :${info.localPort} -> ${info.nodeId}:${info.remotePort} (mesh-accessible via ${findNode('windows')?.host ?? 'localhost'}:${info.localPort})`);
+          }
+          await manager.exec(localNode, `mkdir -p ${stateDir}; BIND=${bindAddr}; socat TCP4-LISTEN:${info.localPort},bind=$BIND,reuseaddr,fork TCP4:127.0.0.1:${info.localPort} >/tmp/${id}.log 2>&1 & echo $! > ${stateDir}/${id}.pid`);
+          return okBrief(`tunnel ${info.id}  :${info.localPort} -> ${info.nodeId}:${info.remotePort} (mesh-exposed on wg0:${info.localPort})`);
+        } catch (e) {
+          return fail((e as Error).message);
+        }
       }
       try {
         const info = await tunnels.create(node, local_port, remote_port, remote_host);
@@ -1035,22 +1100,82 @@ tags: ${meshNode.tags.join(', ')}`;
   // --- Tool 26: omniwire_update ---
   server.tool(
     'omniwire_update',
-    'Check for updates and self-update OmniWire to the latest version.',
+    'Check for updates, self-update OmniWire, manage auto-updates, and push updates to all mesh nodes. Sources: npm + GitHub releases.',
     {
-      check_only: z.boolean().optional().describe('Only check for updates without installing (default: false)'),
+      action: z.enum(['check', 'update', 'auto-on', 'auto-off', 'auto-status', 'mesh-update']).optional()
+        .describe('check=check only, update=install latest (default), auto-on=enable background auto-update, auto-off=disable, auto-status=show state, mesh-update=update all mesh nodes'),
+      source: z.enum(['npm', 'github', 'auto']).optional().describe('Update source (default: auto — tries npm then github)'),
+      check_only: z.boolean().optional().describe('Alias for action=check'),
+      interval_hours: z.number().optional().describe('Auto-update check interval in hours (for auto-on, default: 1)'),
     },
-    async ({ check_only }) => {
-      const { checkForUpdate, selfUpdate, getSystemInfo } = await import('../update.js');
+    async ({ action, source, check_only, interval_hours }) => {
+      const { checkForUpdate, selfUpdate, getSystemInfo, startAutoUpdate, stopAutoUpdate, getAutoUpdateState } = await import('../update.js');
       const info = getSystemInfo();
+      const act = action ?? (check_only ? 'check' : 'update');
+      const src = source ?? 'auto';
 
-      if (check_only) {
-        const check = await checkForUpdate();
+      if (act === 'check') {
+        const check = await checkForUpdate(src);
         return check.updateAvailable
-          ? okBrief(`update available: ${check.current} -> ${check.latest}  (${info.platform}/${info.arch})`)
+          ? okBrief(`update available: ${check.current} → ${check.latest} (${check.source})  ${info.platform}/${info.arch}`)
           : okBrief(`up to date (${check.current})  ${info.platform}/${info.arch}`);
       }
 
-      const result = await selfUpdate();
+      if (act === 'auto-on') {
+        const intervalMs = (interval_hours ?? 1) * 3_600_000;
+        startAutoUpdate(intervalMs, (result) => {
+          // Log auto-update results (fire-and-forget)
+          if (result.updated) {
+            process.stderr.write(`[omniwire] auto-updated: ${result.message}\n`);
+          }
+        });
+        return okBrief(`auto-update enabled (check every ${interval_hours ?? 1}h, source: ${src})`);
+      }
+
+      if (act === 'auto-off') {
+        stopAutoUpdate();
+        return okBrief('auto-update disabled');
+      }
+
+      if (act === 'auto-status') {
+        const state = getAutoUpdateState();
+        return okBrief([
+          `auto-update: ${state.autoUpdateEnabled ? 'ON' : 'OFF'}`,
+          `timer: ${state.timerActive ? 'active' : 'inactive'}`,
+          `interval: ${(state.checkIntervalMs / 3_600_000).toFixed(1)}h`,
+          `last check: ${state.lastCheck ? new Date(state.lastCheck).toISOString() : 'never'}`,
+          `current: ${state.currentVersion}`,
+          `source: ${state.source}`,
+        ].join('\n'));
+      }
+
+      if (act === 'mesh-update') {
+        // Update all mesh nodes in parallel
+        const nodes = remoteNodes();
+        const check = await checkForUpdate(src);
+        if (!check.updateAvailable) return okBrief(`all nodes up to date (${check.current})`);
+
+        const results = await Promise.allSettled(
+          nodes.map(async (n) => {
+            const npmCmd = n.os === 'windows' ? 'npm.cmd' : 'npm';
+            const r = await manager.exec(n.id, `${npmCmd} install -g omniwire@${check.latest} 2>&1 || ${npmCmd} update -g omniwire 2>&1; omniwire --version 2>/dev/null || echo "v?"`)
+              .catch(() => ({ stdout: 'UNREACHABLE', stderr: '', code: 1, durationMs: 0, nodeId: n.id }));
+            return `${n.id}: ${r.stdout.trim().split('\n').pop()}`;
+          })
+        );
+
+        // Also update locally
+        const localResult = await selfUpdate(src);
+
+        const lines = results.map((r, i) =>
+          r.status === 'fulfilled' ? r.value : `${nodes[i].id}: FAIL`
+        );
+        lines.unshift(`local: ${localResult.message}`);
+        return okBrief(`mesh-update to ${check.latest}:\n${lines.join('\n')}`);
+      }
+
+      // Default: update
+      const result = await selfUpdate(src);
       return okBrief(`${result.message}  ${info.platform}/${info.arch}`);
     }
   );
@@ -3773,6 +3898,742 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       if (action === 'unload') {
         if (!plugin_name) return fail('plugin_name required');
         return okBrief(`plugin ${plugin_name} unloaded (in-memory only — no persistent state)`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 53: omniwire_knowledge ---
+  server.tool(
+    'omniwire_knowledge',
+    'CyberBase knowledge base — CRUD, search, and health management for the unified PostgreSQL knowledge store. Supports text search, semantic/vector search, categories, and bulk operations.',
+    {
+      action: z.enum(['get', 'set', 'delete', 'search', 'semantic-search', 'list', 'stats', 'health', 'categories', 'bulk-set', 'export', 'vacuum']).describe('Action'),
+      category: z.string().optional().describe('Knowledge category (e.g., tools, vulns, infra, notes)'),
+      key: z.string().optional().describe('Knowledge key (for get/set/delete)'),
+      value: z.string().optional().describe('Value to store (for set)'),
+      query: z.string().optional().describe('Search query (for search/semantic-search)'),
+      source: z.string().optional().describe('Filter by source_tool (default: omniwire)'),
+      limit: z.number().optional().describe('Max results (default: 20)'),
+      entries: z.array(z.object({ key: z.string(), value: z.string() })).optional().describe('For bulk-set: array of {key, value} pairs'),
+    },
+    async ({ action, category, key, value, query, source, limit: maxResults, entries }) => {
+      const lim = maxResults ?? 20;
+
+      if (action === 'health') {
+        const h = getCbHealth();
+        if (!cbManager) return fail('CyberBase manager not initialized');
+        // Also ping the database
+        try {
+          const r = await cbManager.exec('contabo', pgExec("SELECT 'ok' AS status, count(*) AS total FROM knowledge;"));
+          return okBrief(`CyberBase health:\n  DB: ${r.stdout.includes('ok') ? 'OK' : 'UNREACHABLE'}\n  Circuit: ${h.healthy ? 'CLOSED (healthy)' : 'OPEN (paused)'}\n  Fails: ${h.failCount}\n  Queue: ${h.queueSize}\n  Last error: ${h.lastError || '(none)'}\n${r.stdout.trim()}`);
+        } catch (e) {
+          return okBrief(`CyberBase health: UNREACHABLE\n  Circuit: ${h.healthy ? 'CLOSED' : 'OPEN'}\n  Fails: ${h.failCount}\n  Error: ${(e as Error).message}`);
+        }
+      }
+
+      if (action === 'stats') {
+        if (!cbManager) return fail('no CyberBase connection');
+        const r = await cbManager.exec('contabo', pgExec("SELECT source_tool, count(*) as cnt FROM knowledge GROUP BY source_tool ORDER BY cnt DESC LIMIT 20;"));
+        return okBrief(`CyberBase stats:\n${r.stdout.trim()}`);
+      }
+
+      if (action === 'categories') {
+        if (!cbManager) return fail('no CyberBase connection');
+        const src = source ?? 'omniwire';
+        const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s'; SELECT DISTINCT split_part(key, ':', 1) AS cat, count(*) FROM knowledge WHERE source_tool='${sqlEscape(src)}' GROUP BY cat ORDER BY count DESC LIMIT 50;" 2>/dev/null`);
+        return okBrief(`Categories (${src}):\n${r.stdout.trim()}`);
+      }
+
+      if (action === 'get') {
+        if (!key) return fail('key required');
+        const fullKey = category ? `${category}:${key}` : key;
+        const val = await cbGet(category ?? '', key);
+        return val ? okBrief(`${fullKey} = ${val}`) : okBrief(`${fullKey}: (not found)`);
+      }
+
+      if (action === 'set') {
+        if (!key || !value) return fail('key and value required');
+        cb(category ?? 'general', key, value);
+        return okBrief(`stored ${category ?? 'general'}:${key} (${value.length} chars) → CyberBase queue (${CB_QUEUE.length} pending)`);
+      }
+
+      if (action === 'delete') {
+        if (!key) return fail('key required');
+        if (!cbManager) return fail('no CyberBase connection');
+        const fullKey = sqlEscape(category ? `${category}:${key}` : key);
+        const r = await cbManager.exec('contabo', pgExec(`DELETE FROM knowledge WHERE source_tool='omniwire' AND key='${fullKey}';`));
+        return okBrief(`deleted: ${fullKey} ${r.stdout.includes('DELETE') ? 'OK' : 'WARN: may not exist'}`);
+      }
+
+      if (action === 'search') {
+        if (!query) return fail('query required');
+        const result = await cbSearch(query, source);
+        return okBrief(result || '(no results)');
+      }
+
+      if (action === 'semantic-search') {
+        if (!query) return fail('query required');
+        const result = await cbSemanticSearch(query, lim);
+        return okBrief(result || '(no results — embeddings may not be populated)');
+      }
+
+      if (action === 'list') {
+        const cat = category ?? 'general';
+        const keys = await cbList(cat);
+        return okBrief(keys.length > 0 ? `${cat}: ${keys.length} entries\n${keys.join('\n')}` : `${cat}: (empty)`);
+      }
+
+      if (action === 'bulk-set') {
+        if (!entries?.length) return fail('entries array required');
+        const cat = category ?? 'general';
+        for (const entry of entries) {
+          cb(cat, entry.key, entry.value);
+        }
+        return okBrief(`queued ${entries.length} entries to ${cat} → CyberBase (${CB_QUEUE.length} pending)`);
+      }
+
+      if (action === 'export') {
+        if (!cbManager) return fail('no CyberBase connection');
+        const src = source ?? 'omniwire';
+        const catFilter = category ? `AND key LIKE '${sqlEscape(category)}:%'` : '';
+        const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='10s'; SELECT json_agg(json_build_object('key', key, 'value', value->>'data', 'updated', updated_at)) FROM knowledge WHERE source_tool='${sqlEscape(src)}' ${catFilter} LIMIT ${lim};" 2>/dev/null`);
+        return okBrief(r.stdout.trim() || '(no data)');
+      }
+
+      if (action === 'vacuum') {
+        if (!cbManager) return fail('no CyberBase connection');
+        const r = await cbManager.exec('contabo', pgExec("DELETE FROM knowledge WHERE value IS NULL OR value::text = 'null' OR key = ''; VACUUM ANALYZE knowledge;"));
+        return okBrief(`vacuum complete:\n${r.stdout.trim()}`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 54: omniwire_omnimesh ---
+  server.tool(
+    'omniwire_omnimesh',
+    'OmniMesh — built-in WireGuard mesh network manager. Create, manage, and monitor a full-mesh or hub-spoke WireGuard VPN across all nodes and any OS (Linux/Windows/macOS). Actions: status, init, add-peer, remove-peer, genkeys, deploy-config, up, down, install, health, rotate-keys, discover-endpoint, topology, sync-peers.',
+    {
+      action: z.enum([
+        'status', 'init', 'add-peer', 'remove-peer', 'genkeys', 'deploy-config',
+        'up', 'down', 'install', 'health', 'rotate-keys', 'discover-endpoint',
+        'topology', 'sync-peers',
+      ]).describe('Action to perform'),
+      node: z.string().optional().describe('Target node (default: contabo). Use "all" for mesh-wide operations.'),
+      interface: z.string().optional().describe('WireGuard interface name (default: omnimesh0)'),
+      peer_id: z.string().optional().describe('Peer node ID (for add-peer/remove-peer)'),
+      peer_pubkey: z.string().optional().describe('Peer public key (for add-peer)'),
+      peer_endpoint: z.string().optional().describe('Peer endpoint host:port (for add-peer)'),
+      peer_mesh_ip: z.string().optional().describe('Peer mesh IP (for add-peer, e.g., 10.10.0.5)'),
+      peer_psk: z.string().optional().describe('Pre-shared key for quantum resistance (for add-peer)'),
+      mesh_ip: z.string().optional().describe('This node\'s mesh IP (for init, e.g., 10.10.0.1)'),
+      listen_port: z.number().optional().describe('Listen port (default: 51820)'),
+      private_key: z.string().optional().describe('Private key (for init — leave empty to auto-generate)'),
+      topology_type: z.enum(['full-mesh', 'hub-spoke']).optional().describe('Topology for sync-peers (default: full-mesh)'),
+      hub_node: z.string().optional().describe('Hub node ID for hub-spoke topology'),
+      dns: z.array(z.string()).optional().describe('DNS servers (for init)'),
+      nat_forward: z.boolean().optional().describe('Enable NAT forwarding / IP masquerade (for init, default: false)'),
+    },
+    async ({ action, node, interface: iface, peer_id, peer_pubkey, peer_endpoint, peer_mesh_ip, peer_psk, mesh_ip, listen_port, private_key, topology_type, hub_node, dns, nat_forward }) => {
+      const nodeId = node ?? 'contabo';
+      const wgIface = iface ?? 'omnimesh0';
+      const port = listen_port ?? 51820;
+      const configDir = '/etc/omniwire/omnimesh';
+
+      // Helper: exec on one or all nodes
+      const execOn = async (nid: string, cmd: string): Promise<{ nodeId: string; stdout: string; stderr: string; code: number; durationMs: number }> => {
+        if (nid === 'windows') {
+          // Local Windows execution via powershell
+          const { execSync } = await import('node:child_process');
+          try {
+            const out = execSync(cmd, { timeout: 15000, encoding: 'utf-8' });
+            return { nodeId: 'windows', stdout: out, stderr: '', code: 0, durationMs: 0 };
+          } catch (e: any) {
+            return { nodeId: 'windows', stdout: e.stdout ?? '', stderr: e.stderr ?? e.message, code: e.status ?? 1, durationMs: 0 };
+          }
+        }
+        return manager.exec(nid, cmd);
+      };
+
+      const execAll = async (cmd: string | ((nid: string) => string)): Promise<string> => {
+        const targets = nodeId === 'all' ? allNodes().map((n) => n.id) : [nodeId];
+        const results = await Promise.allSettled(
+          targets.map(async (nid) => {
+            const c = typeof cmd === 'function' ? cmd(nid) : cmd;
+            const r = await execOn(nid, c);
+            return `${nid}: ${r.stdout.trim().split('\n').slice(0, 5).join(' | ')}`;
+          })
+        );
+        return results.map((r, i) =>
+          r.status === 'fulfilled' ? r.value : `${targets[i]}: FAIL ${(r.reason as Error).message}`
+        ).join('\n');
+      };
+
+      if (action === 'status') {
+        const cmd = meshStatusCmd('linux', wgIface);
+        const output = await execAll(cmd);
+        return okBrief(`OmniMesh status (${wgIface}):\n${output}`);
+      }
+
+      if (action === 'install') {
+        const output = await execAll((nid) => {
+          const nodeConf = findNode(nid);
+          const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+          return `${checkInstalledCmd(os)} && echo "already installed" || (${installCmd(os)})`;
+        });
+        return okBrief(`WireGuard install:\n${output}`);
+      }
+
+      if (action === 'genkeys') {
+        const nodeConf = findNode(nodeId);
+        const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+        const r = await execOn(nodeId, genKeysCmd(os));
+        const keys = parseKeys(r.stdout);
+        // Save keys to config dir
+        if (os !== 'windows') {
+          await execOn(nodeId, `mkdir -p ${configDir}; echo '${keys.privateKey}' > ${configDir}/${nodeId}.key; echo '${keys.publicKey}' > ${configDir}/${nodeId}.pub; ${keys.presharedKey ? `echo '${keys.presharedKey}' > ${configDir}/${nodeId}.psk` : 'true'}; chmod 600 ${configDir}/*.key 2>/dev/null`);
+        }
+        return okBrief(`Keys generated for ${nodeId}:\n  Public: ${keys.publicKey}\n  PSK: ${keys.presharedKey ?? '(none)'}\n  Saved to ${configDir}/`);
+      }
+
+      if (action === 'init') {
+        if (!mesh_ip) return fail('mesh_ip required (e.g., 10.10.0.1)');
+        const nodeConf = findNode(nodeId);
+        const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+
+        // Generate keys if not provided
+        let privKey = private_key;
+        if (!privKey) {
+          const r = await execOn(nodeId, genKeysCmd(os));
+          const keys = parseKeys(r.stdout);
+          privKey = keys.privateKey;
+          // Save keys
+          if (os !== 'windows') {
+            await execOn(nodeId, `mkdir -p ${configDir}; echo '${keys.privateKey}' > ${configDir}/${nodeId}.key; echo '${keys.publicKey}' > ${configDir}/${nodeId}.pub; chmod 600 ${configDir}/*.key`);
+          }
+        }
+
+        // Build minimal config (no peers yet — use add-peer or sync-peers)
+        const postUp = nat_forward ? natTraversalPostUp(wgIface) : undefined;
+        const postDown = nat_forward ? natTraversalPostDown(wgIface) : undefined;
+        const configContent = buildWgConfig(
+          { privateKey: privKey, meshIp: mesh_ip, listenPort: port },
+          [],  // Peers added later
+          { interfaceName: wgIface, meshSubnet: '10.10.0.0/24', listenPort: port, dns, postUp, postDown },
+        );
+
+        const confPath = wgConfigPath(os, wgIface);
+        if (os === 'windows') {
+          // Windows: write config via echo (simplified)
+          return okBrief(`Config generated for Windows. Save to ${confPath} and import via WireGuard GUI.\nConfig:\n${configContent}`);
+        }
+
+        await execOn(nodeId, `mkdir -p /etc/wireguard; cat > ${confPath} << 'OMNIMESH_EOF'\n${configContent}\nOMNIMESH_EOF\nchmod 600 ${confPath}`);
+        return okBrief(`OmniMesh initialized on ${nodeId}:\n  Interface: ${wgIface}\n  Mesh IP: ${mesh_ip}\n  Port: ${port}\n  Config: ${confPath}\n  NAT forward: ${nat_forward ? 'yes' : 'no'}\n  Use 'up' action to activate.`);
+      }
+
+      if (action === 'up') {
+        const nodeConf = findNode(nodeId);
+        const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+        const output = await execAll(bringUpCmd(os, wgIface));
+        return okBrief(`OmniMesh up:\n${output}`);
+      }
+
+      if (action === 'down') {
+        const nodeConf = findNode(nodeId);
+        const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+        const output = await execAll(bringDownCmd(os, wgIface));
+        return okBrief(`OmniMesh down:\n${output}`);
+      }
+
+      if (action === 'add-peer') {
+        if (!peer_pubkey) return fail('peer_pubkey required');
+        if (!peer_mesh_ip) return fail('peer_mesh_ip required');
+        const peer = {
+          id: peer_id ?? 'unknown',
+          publicKey: peer_pubkey,
+          endpoint: peer_endpoint,
+          meshIp: peer_mesh_ip,
+          allowedIps: `${peer_mesh_ip}/32`,
+          keepalive: 25,
+          os: 'linux' as const,
+        };
+        const cmd = addPeerCmd(wgIface, peer, peer_psk);
+        const r = await execOn(nodeId, `${cmd} 2>&1 && echo "peer added: ${peer_id ?? peer_mesh_ip}"`);
+        // Also append to config file for persistence
+        const confPath = wgConfigPath('linux', wgIface);
+        const peerConf = [
+          `\n[Peer]\n# ${peer.id}`,
+          `PublicKey = ${peer.publicKey}`,
+          peer_psk ? `PresharedKey = ${peer_psk}` : '',
+          `AllowedIPs = ${peer.allowedIps}`,
+          peer.endpoint ? `Endpoint = ${peer.endpoint}` : '',
+          `PersistentKeepalive = 25`,
+        ].filter(Boolean).join('\n');
+        await execOn(nodeId, `echo '${peerConf}' >> ${confPath} 2>/dev/null`);
+        return okBrief(`${r.stdout.trim()}\nPersisted to ${confPath}`);
+      }
+
+      if (action === 'remove-peer') {
+        if (!peer_pubkey && !peer_id) return fail('peer_pubkey or peer_id required');
+        if (peer_pubkey) {
+          const r = await execOn(nodeId, `${removePeerCmd(wgIface, peer_pubkey)} 2>&1 && echo "peer removed"`);
+          return okBrief(r.stdout.trim());
+        }
+        // Find pubkey by peer_id from config
+        const r = await execOn(nodeId, `grep -A1 "# ${peer_id}" /etc/wireguard/${wgIface}.conf 2>/dev/null | grep PublicKey | awk '{print $3}'`);
+        const pubkey = r.stdout.trim();
+        if (!pubkey) return fail(`peer ${peer_id} not found in config`);
+        const r2 = await execOn(nodeId, `${removePeerCmd(wgIface, pubkey)} 2>&1 && echo "peer ${peer_id} removed (${pubkey})"`);
+        return okBrief(r2.stdout.trim());
+      }
+
+      if (action === 'health') {
+        // Ping all mesh peers and check handshakes
+        const targets = nodeId === 'all' ? remoteNodes().map((n) => n.id) : [nodeId];
+        const results = await Promise.allSettled(
+          targets.map(async (nid) => {
+            // Get peer IPs from wg show
+            const statusR = await manager.exec(nid, `wg show ${wgIface} allowed-ips 2>/dev/null | awk '{print $2}' | cut -d/ -f1`);
+            const peerIps = statusR.stdout.trim().split('\n').filter(Boolean);
+            const r = await manager.exec(nid, healthCheckCmd(wgIface, peerIps));
+            return `--- ${nid} ---\n${r.stdout.trim()}`;
+          })
+        );
+        const lines = results.map((r, i) =>
+          r.status === 'fulfilled' ? r.value : `--- ${targets[i]} --- FAIL`
+        );
+        return okBrief(`OmniMesh health:\n${lines.join('\n')}`);
+      }
+
+      if (action === 'rotate-keys') {
+        const nodeConf = findNode(nodeId);
+        const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+        const r = await execOn(nodeId, rotateKeyCmd(wgIface, os));
+        const keys = parseKeys(r.stdout);
+        if (keys.publicKey) {
+          // Save new keys
+          await execOn(nodeId, `mkdir -p ${configDir}; echo '${keys.privateKey}' > ${configDir}/${nodeId}.key; echo '${keys.publicKey}' > ${configDir}/${nodeId}.pub; chmod 600 ${configDir}/*.key`);
+        }
+        return okBrief(`Keys rotated on ${nodeId}:\n  New public key: ${keys.publicKey}\n  IMPORTANT: Update this public key on all peer nodes.`);
+      }
+
+      if (action === 'discover-endpoint') {
+        const r = await execOn(nodeId, stunDiscoverCmd());
+        return okBrief(`Endpoint discovery for ${nodeId}:\n${r.stdout.trim()}`);
+      }
+
+      if (action === 'topology') {
+        // Show current mesh topology
+        const targets = remoteNodes().map((n) => n.id);
+        const results = await Promise.allSettled(
+          targets.map(async (nid) => {
+            const r = await manager.exec(nid, `wg show ${wgIface} 2>/dev/null | head -20`);
+            return { nid, status: parseWgShow(r.stdout) };
+          })
+        );
+        const lines = results.map((r, i) => {
+          if (r.status !== 'fulfilled') return `${targets[i]}: OFFLINE`;
+          const { nid, status } = r.value;
+          const peerCount = status.peers.length;
+          const peerList = status.peers.map((p) => `  → ${p.meshIp} (${p.endpoint ?? 'no endpoint'})`).join('\n');
+          return `${nid} (${status.meshIp || '?'}) — ${peerCount} peers:\n${peerList || '  (none)'}`;
+        });
+        return okBrief(`OmniMesh topology (${wgIface}):\n${lines.join('\n')}`);
+      }
+
+      if (action === 'sync-peers') {
+        // Collect all peer configs from all nodes, then push full mesh to each
+        const topo = topology_type ?? 'full-mesh';
+        const targets = remoteNodes();
+
+        // Phase 1: Gather public keys + mesh IPs from all nodes
+        const peerInfos = await Promise.allSettled(
+          targets.map(async (n) => {
+            const r = await manager.exec(n.id, [
+              `wg show ${wgIface} public-key 2>/dev/null || cat ${configDir}/${n.id}.pub 2>/dev/null || echo ""`,
+              `echo "---"`,
+              `ip -4 addr show ${wgIface} 2>/dev/null | grep -oP 'inet \\K[0-9.]+' || echo ""`,
+              `echo "---"`,
+              `curl -s --max-time 3 https://api.ipify.org 2>/dev/null || echo ""`,
+            ].join('; '));
+            const parts = r.stdout.split('---').map((p) => p.trim());
+            return {
+              id: n.id,
+              publicKey: parts[0] ?? '',
+              meshIp: parts[1] || n.host,
+              endpoint: parts[2] ? `${parts[2]}:${port}` : undefined,
+            };
+          })
+        );
+
+        const validPeers: { id: string; publicKey: string; meshIp: string; endpoint?: string }[] = [];
+        for (const r of peerInfos) {
+          if (r.status === 'fulfilled' && r.value.publicKey) validPeers.push(r.value);
+        }
+
+        if (validPeers.length < 2) return fail(`Need at least 2 nodes with keys. Found: ${validPeers.length}. Run genkeys first.`);
+
+        // Phase 2: Generate topology
+        const meshTopo = generateMeshTopology(validPeers, topo, hub_node);
+
+        // Phase 3: Push peer configs to each node
+        const syncResults = await Promise.allSettled(
+          [...meshTopo.entries()].map(async ([nid, peers]) => {
+            const cmds = peers.map((p) => addPeerCmd(wgIface, p));
+            const r = await manager.exec(nid, cmds.join('; ') + `; echo "synced ${peers.length} peers"`);
+            return `${nid}: ${r.stdout.trim()}`;
+          })
+        );
+
+        const lines = syncResults.map((r, i) =>
+          r.status === 'fulfilled' ? r.value : `${[...meshTopo.keys()][i]}: FAIL`
+        );
+        return okBrief(`OmniMesh sync-peers (${topo}):\n${lines.join('\n')}`);
+      }
+
+      if (action === 'deploy-config') {
+        // Generate and deploy full config to a node
+        // Read existing peer info from mesh
+        const r = await execOn(nodeId, `wg show ${wgIface} 2>/dev/null`);
+        return okBrief(`Current config on ${nodeId}:\n${r.stdout.trim()}\n\nUse init + sync-peers for full deployment.`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 54: omniwire_events ---
+  server.tool(
+    'omniwire_events',
+    'Event bus with Webhook + WebSocket + SSE support. Publish events, manage webhooks, query event log. All transports receive real-time events.',
+    {
+      action: z.enum(['publish', 'recent', 'stats', 'add-webhook', 'remove-webhook', 'list-webhooks']).describe('Action'),
+      event_type: z.string().optional().describe('Event type for publish (e.g., custom, alert.fired)'),
+      source: z.string().optional().describe('Event source (default: mcp)'),
+      data: z.record(z.string(), z.unknown()).optional().describe('Event data payload (JSON object)'),
+      count: z.number().optional().describe('Number of recent events to retrieve (default: 50)'),
+      filter_type: z.string().optional().describe('Filter recent events by type'),
+      webhook_url: z.string().optional().describe('Webhook URL for add-webhook'),
+      webhook_id: z.string().optional().describe('Webhook ID for remove-webhook'),
+      webhook_events: z.array(z.string()).optional().describe('Event types to subscribe to (default: all)'),
+      webhook_secret: z.string().optional().describe('HMAC-SHA256 secret for webhook signatures'),
+    },
+    async ({ action, event_type, source, data, count, filter_type, webhook_url, webhook_id, webhook_events, webhook_secret }) => {
+      const { eventBus } = await import('./events.js');
+
+      if (action === 'publish') {
+        const evt = eventBus.publish(
+          (event_type ?? 'custom') as any,
+          source ?? 'mcp',
+          data ?? {},
+        );
+        return okBrief(`published: ${evt.id} (${evt.type}) → ${eventBus.getStats().sseClients} SSE + ${eventBus.getStats().wsClients} WS + ${eventBus.getStats().webhooks} webhooks`);
+      }
+
+      if (action === 'recent') {
+        const events = eventBus.getRecentEvents(count ?? 50, filter_type as any);
+        const lines = events.map((e) => `${new Date(e.timestamp).toISOString().slice(11, 19)} ${e.type} [${e.source}] ${JSON.stringify(e.data).slice(0, 100)}`);
+        return okBrief(lines.join('\n') || '(no events)');
+      }
+
+      if (action === 'stats') {
+        const s = eventBus.getStats();
+        return okBrief(`SSE: ${s.sseClients} | WS: ${s.wsClients} | Webhooks: ${s.webhooks} | Events: ${s.totalEvents} | Log: ${s.logSize}`);
+      }
+
+      if (action === 'add-webhook') {
+        if (!webhook_url) return fail('webhook_url required');
+        const id = webhook_id ?? `wh-${Date.now()}`;
+        eventBus.addWebhook({
+          id,
+          url: webhook_url,
+          events: webhook_events as any ?? '*',
+          secret: webhook_secret,
+          retries: 3,
+          timeoutMs: 5000,
+          active: true,
+        });
+        return okBrief(`webhook added: ${id} → ${webhook_url} (events: ${webhook_events?.join(',') ?? '*'})`);
+      }
+
+      if (action === 'remove-webhook') {
+        if (!webhook_id) return fail('webhook_id required');
+        const removed = eventBus.removeWebhook(webhook_id);
+        return okBrief(removed ? `webhook removed: ${webhook_id}` : `webhook not found: ${webhook_id}`);
+      }
+
+      if (action === 'list-webhooks') {
+        const hooks = eventBus.listWebhooks();
+        if (hooks.length === 0) return okBrief('(no webhooks configured)');
+        const lines = hooks.map((h) => `${h.id}  ${h.url}  events=${typeof h.events === 'string' ? h.events : h.events.join(',')}  active=${h.active}`);
+        return okBrief(lines.join('\n'));
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 56: omniwire_mesh_expose ---
+  server.tool(
+    'omniwire_mesh_expose',
+    'Expose localhost-bound services to the entire WireGuard/Tailscale mesh. Makes any 127.0.0.1 service reachable from all mesh nodes via socat forwarding on the node\'s mesh IP (wg0). Actions: expose, unexpose, list, discover, expose-remote.',
+    {
+      action: z.enum(['expose', 'unexpose', 'list', 'discover', 'expose-remote']).describe(
+        'expose=forward localhost port to mesh IP, unexpose=stop forwarding, list=show active exposures, discover=scan for localhost-only services, expose-remote=expose a remote node\'s localhost to the whole mesh'
+      ),
+      node: z.string().optional().describe('Target node (default: contabo)'),
+      port: z.number().optional().describe('Localhost port to expose (for expose/unexpose)'),
+      mesh_port: z.number().optional().describe('Port to listen on mesh interface (default: same as port)'),
+      protocol: z.enum(['tcp', 'udp']).optional().describe('Protocol (default: tcp)'),
+      name: z.string().optional().describe('Friendly label for this exposure (e.g., "cdp", "postgres", "redis")'),
+      bind: z.enum(['mesh', 'all']).optional().describe('mesh=bind to wg0 IP only (default, secure), all=bind to 0.0.0.0 (includes public)'),
+      source_node: z.string().optional().describe('For expose-remote: which node\'s localhost to expose'),
+    },
+    async ({ action, node, port, mesh_port, protocol, name, bind, source_node }) => {
+      const nodeId = node ?? 'contabo';
+      const proto = protocol ?? 'tcp';
+      const stateDir = '/tmp/.omniwire-mesh-expose';
+      const initCmd = `mkdir -p ${stateDir}`;
+
+      if (action === 'discover') {
+        // Scan for localhost-only listeners that aren't exposed to mesh yet
+        const result = await manager.exec(nodeId, [
+          initCmd,
+          `echo "=== Localhost-only services ==="`,
+          `ss -tlnp 2>/dev/null | awk 'NR>1 && ($4 ~ /^127\\.0\\.0\\.1:/ || $4 ~ /^\\[::1\\]:/ || $4 ~ /^localhost:/) {print $4, $6}' | sort -u`,
+          `echo "=== Already exposed ==="`,
+          `ls ${stateDir}/*.info 2>/dev/null | while read f; do cat "$f"; done || echo "(none)"`,
+          `echo "=== Common services ==="`,
+          // Check well-known localhost ports
+          `for pair in "5432:postgresql" "6379:redis" "9222:cdp-chrome" "3000:dev-server" "8080:http-alt" "27017:mongodb" "5672:rabbitmq" "15672:rabbitmq-mgmt" "9090:prometheus" "3100:loki" "8200:vault" "8500:consul" "2375:docker-api" "11434:ollama" "6333:qdrant" "19530:milvus" "8095:omniwire-api"; do`,
+          `  p=$(echo $pair | cut -d: -f1); n=$(echo $pair | cut -d: -f2)`,
+          `  ss -tlnp 2>/dev/null | grep -q ":$p " && echo "  FOUND $n on :$p" || true`,
+          `done`,
+        ].join('; '));
+        return ok(nodeId, result.durationMs, result.stdout, 'mesh-expose discover');
+      }
+
+      if (action === 'list') {
+        const result = await manager.exec(nodeId, [
+          initCmd,
+          `echo "NODE  LOCAL_PORT  MESH_PORT  PROTO  NAME  PID  STATUS"`,
+          `ls ${stateDir}/*.pid 2>/dev/null | while read f; do`,
+          `  id=$(basename "$f" .pid); pid=$(cat "$f" 2>/dev/null)`,
+          `  info=$(cat "${stateDir}/$id.info" 2>/dev/null || echo "?")`,
+          `  alive=$(kill -0 "$pid" 2>/dev/null && echo "running" || echo "dead")`,
+          `  echo "$info  pid=$pid  $alive"`,
+          `done || echo "(no active exposures)"`,
+        ].join(' '));
+        return ok(nodeId, result.durationMs, result.stdout, 'mesh-expose list');
+      }
+
+      if (action === 'expose') {
+        if (!port) return fail('port required');
+        const mPort = mesh_port ?? port;
+        const label = name ?? `port-${port}`;
+        const id = `mesh-${label}-${proto}-${mPort}`;
+        // Get the node's wg0 IP for mesh-only binding
+        const bindAddr = bind === 'all' ? '0.0.0.0' : `$(ip -4 addr show wg0 2>/dev/null | grep -oP 'inet \\K[0-9.]+' || echo '0.0.0.0')`;
+
+        const socatProto = proto === 'udp' ? 'UDP4' : 'TCP4';
+        const listenOpts = proto === 'udp'
+          ? `${socatProto}-LISTEN:${mPort},bind=${bindAddr},reuseaddr,fork`
+          : `${socatProto}-LISTEN:${mPort},bind=${bindAddr},reuseaddr,fork`;
+        const connectOpts = `${socatProto}:127.0.0.1:${port}`;
+
+        const result = await manager.exec(nodeId, [
+          initCmd,
+          // Kill existing if any
+          `[ -f "${stateDir}/${id}.pid" ] && kill $(cat "${stateDir}/${id}.pid") 2>/dev/null; rm -f "${stateDir}/${id}."* 2>/dev/null`,
+          // Start socat forwarder
+          `BIND_ADDR=${bindAddr}`,
+          `socat ${listenOpts.replace(bindAddr, '$BIND_ADDR')} ${connectOpts} >/tmp/${id}.log 2>&1 & echo $! > ${stateDir}/${id}.pid`,
+          `echo "${nodeId}  ${port}  ${mPort}  ${proto}  ${label}" > ${stateDir}/${id}.info`,
+          `sleep 0.3`,
+          `pid=$(cat ${stateDir}/${id}.pid 2>/dev/null)`,
+          `kill -0 "$pid" 2>/dev/null && echo "EXPOSED: 127.0.0.1:${port} → mesh:${mPort} (${proto}) as '${label}' pid=$pid bind=$BIND_ADDR" || echo "FAIL: check /tmp/${id}.log"`,
+        ].join('; '));
+        return ok(nodeId, result.durationMs, result.stdout, `mesh-expose ${label}:${port}→${mPort}`);
+      }
+
+      if (action === 'unexpose') {
+        if (!port && !name) return fail('port or name required');
+        const pattern = name ? `mesh-${name}-*` : `mesh-*-${proto}-${mesh_port ?? port}`;
+        const result = await manager.exec(nodeId, [
+          initCmd,
+          `found=0`,
+          `for f in ${stateDir}/${pattern}.pid; do`,
+          `  [ -f "$f" ] || continue`,
+          `  id=$(basename "$f" .pid); pid=$(cat "$f" 2>/dev/null)`,
+          `  kill "$pid" 2>/dev/null; rm -f "${stateDir}/$id."*`,
+          `  echo "UNEXPOSED: $id (pid=$pid)"`,
+          `  found=1`,
+          `done`,
+          `[ "$found" = "0" ] && echo "no matching exposure found for ${name ?? `port ${port}`}"`,
+        ].join('; '));
+        return ok(nodeId, result.durationMs, result.stdout, 'mesh-unexpose');
+      }
+
+      if (action === 'expose-remote') {
+        // Expose a remote node's localhost service to the whole mesh via SSH tunnel + socat
+        if (!source_node) return fail('source_node required — which node\'s localhost service to expose');
+        if (!port) return fail('port required');
+        const mPort = mesh_port ?? port;
+        const label = name ?? `remote-${source_node}-${port}`;
+        const id = `mesh-remote-${label}-${proto}-${mPort}`;
+
+        // SSH forward from source_node's localhost:port to this node's mesh IP, then socat expose
+        const srcNode = findNode(source_node);
+        if (!srcNode) return fail(`unknown source node: ${source_node}`);
+
+        const bindAddr = bind === 'all' ? '0.0.0.0' : `$(ip -4 addr show wg0 2>/dev/null | grep -oP 'inet \\K[0-9.]+' || echo '0.0.0.0')`;
+
+        const result = await manager.exec(nodeId, [
+          initCmd,
+          // Kill existing
+          `[ -f "${stateDir}/${id}.pid" ] && kill $(cat "${stateDir}/${id}.pid") 2>/dev/null; rm -f "${stateDir}/${id}."* 2>/dev/null`,
+          // SSH tunnel: forward a high local port from the source node's localhost
+          `TMPPORT=$((30000 + RANDOM % 10000))`,
+          `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -L $TMPPORT:127.0.0.1:${port} -N -f ${srcNode.user}@${srcNode.host} 2>/dev/null`,
+          `SSH_PID=$(pgrep -f "ssh.*-L $TMPPORT:127.0.0.1:${port}.*${srcNode.host}" | tail -1)`,
+          // Socat expose the tunneled port to mesh
+          `BIND_ADDR=${bindAddr}`,
+          `socat TCP4-LISTEN:${mPort},bind=$BIND_ADDR,reuseaddr,fork TCP4:127.0.0.1:$TMPPORT >/tmp/${id}.log 2>&1 & SOCAT_PID=$!`,
+          `echo "$SOCAT_PID" > ${stateDir}/${id}.pid`,
+          `echo "$SSH_PID" > ${stateDir}/${id}.ssh_pid`,
+          `echo "${nodeId}  ${source_node}:${port}  ${mPort}  ${proto}  ${label}" > ${stateDir}/${id}.info`,
+          `sleep 0.3`,
+          `kill -0 "$SOCAT_PID" 2>/dev/null && echo "EXPOSED: ${source_node}:localhost:${port} → ${nodeId}:mesh:${mPort} (${proto}) as '${label}'" || echo "FAIL: check /tmp/${id}.log"`,
+        ].join('; '));
+        return ok(nodeId, result.durationMs, result.stdout, `mesh-expose-remote ${source_node}:${port}`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool 57: omniwire_mesh_gateway ---
+  server.tool(
+    'omniwire_mesh_gateway',
+    'Auto-expose all localhost services across the mesh with a single command. Discovers localhost-only services on all nodes and creates bidirectional socat forwarders so every mesh node can access every other node\'s localhost services via mesh IPs.',
+    {
+      action: z.enum(['sync', 'status', 'teardown', 'add-rule', 'remove-rule']).describe(
+        'sync=discover+expose all localhost services mesh-wide, status=show all mesh gateways, teardown=remove all, add-rule=persistent auto-expose rule, remove-rule=remove rule'
+      ),
+      nodes: z.array(z.string()).optional().describe('Nodes to sync (default: all)'),
+      port: z.number().optional().describe('For add-rule: port to always auto-expose'),
+      name: z.string().optional().describe('For add-rule: service name label'),
+    },
+    async ({ action, nodes, port, name: ruleName }) => {
+      const targetNodes = nodes ?? remoteNodes().map((n) => n.id);
+      const rulesFile = '/etc/omniwire/mesh-expose-rules.json';
+      const stateDir = '/tmp/.omniwire-mesh-expose';
+
+      if (action === 'status') {
+        const results = await Promise.allSettled(
+          targetNodes.map(async (nid) => {
+            const r = await manager.exec(nid, [
+              `echo "--- ${nid} ---"`,
+              `ls ${stateDir}/*.info 2>/dev/null | while read f; do`,
+              `  id=$(basename "$f" .info); pid=$(cat "${stateDir}/$id.pid" 2>/dev/null)`,
+              `  alive=$(kill -0 "$pid" 2>/dev/null && echo "UP" || echo "DOWN")`,
+              `  info=$(cat "$f" 2>/dev/null)`,
+              `  echo "  $alive  $info"`,
+              `done || echo "  (no exposures)"`,
+            ].join(' '));
+            return { nid, out: r.stdout };
+          })
+        );
+        const lines = results.map((r) =>
+          r.status === 'fulfilled' ? r.value.out : `--- ${(r.reason as any)?.nid ?? '?'} --- ERROR`
+        );
+        return okBrief(lines.join('\n'));
+      }
+
+      if (action === 'teardown') {
+        const results = await Promise.allSettled(
+          targetNodes.map(async (nid) => {
+            const r = await manager.exec(nid, [
+              `for f in ${stateDir}/*.pid; do [ -f "$f" ] || continue; pid=$(cat "$f"); kill "$pid" 2>/dev/null; done`,
+              `for f in ${stateDir}/*.ssh_pid; do [ -f "$f" ] || continue; pid=$(cat "$f"); kill "$pid" 2>/dev/null; done`,
+              `rm -rf ${stateDir}; echo "cleared"`,
+            ].join('; '));
+            return { nid, out: r.stdout.trim() };
+          })
+        );
+        const lines = results.map((r, i) =>
+          r.status === 'fulfilled' ? `${r.value.nid}: ${r.value.out}` : `${targetNodes[i]}: FAIL`
+        );
+        return okBrief(`teardown complete:\n${lines.join('\n')}`);
+      }
+
+      if (action === 'add-rule') {
+        if (!port) return fail('port required');
+        const label = ruleName ?? `port-${port}`;
+        // Save rule on contabo (hub node)
+        const r = await manager.exec('contabo', [
+          `mkdir -p /etc/omniwire`,
+          `[ -f "${rulesFile}" ] && rules=$(cat "${rulesFile}") || rules='[]'`,
+          `echo "$rules" | jq --arg p "${port}" --arg n "${label}" '. + [{"port": ($p|tonumber), "name": $n}] | unique_by(.port)' > "${rulesFile}"`,
+          `cat "${rulesFile}"`,
+        ].join('; '));
+        return okBrief(`rule added: auto-expose :${port} as "${label}"\n${r.stdout}`);
+      }
+
+      if (action === 'remove-rule') {
+        if (!port) return fail('port required');
+        const r = await manager.exec('contabo', [
+          `[ -f "${rulesFile}" ] || { echo "no rules file"; exit 0; }`,
+          `jq --arg p "${port}" 'map(select(.port != ($p|tonumber)))' "${rulesFile}" > "${rulesFile}.tmp" && mv "${rulesFile}.tmp" "${rulesFile}"`,
+          `cat "${rulesFile}"`,
+        ].join('; '));
+        return okBrief(`rule removed for :${port}\n${r.stdout}`);
+      }
+
+      if (action === 'sync') {
+        // Phase 1: Discover localhost services on all nodes
+        const discoveries = await Promise.allSettled(
+          targetNodes.map(async (nid) => {
+            const r = await manager.exec(nid, [
+              `ss -tlnp 2>/dev/null | awk 'NR>1 && ($4 ~ /^127\\.0\\.0\\.1:/ || $4 ~ /^\\[::1\\]:/) {`,
+              `  split($4, a, ":"); port=a[length(a)]; print port`,
+              `}' | sort -un`,
+            ].join(' '));
+            const ports = r.stdout.trim().split('\n').filter(Boolean).map(Number).filter((p) => p > 0);
+            return { nid, ports };
+          })
+        );
+
+        // Phase 2: For each node's localhost port, expose to mesh on that node
+        const exposeResults: string[] = [];
+        for (const disc of discoveries) {
+          if (disc.status !== 'fulfilled') continue;
+          const { nid, ports } = disc.value;
+          if (ports.length === 0) {
+            exposeResults.push(`${nid}: no localhost services`);
+            continue;
+          }
+
+          // Expose each port on the node's mesh IP
+          const exposeCmds = ports.map((p) => {
+            const id = `mesh-auto-${p}-tcp-${p}`;
+            return [
+              `[ -f "${stateDir}/${id}.pid" ] && kill $(cat "${stateDir}/${id}.pid") 2>/dev/null; rm -f "${stateDir}/${id}."* 2>/dev/null`,
+              `BIND=$(ip -4 addr show wg0 2>/dev/null | grep -oP 'inet \\K[0-9.]+' || echo '0.0.0.0')`,
+              `socat TCP4-LISTEN:${p},bind=$BIND,reuseaddr,fork TCP4:127.0.0.1:${p} >/tmp/${id}.log 2>&1 & echo $! > ${stateDir}/${id}.pid`,
+              `echo "${nid}  ${p}  ${p}  tcp  auto-${p}" > ${stateDir}/${id}.info`,
+            ].join('; ');
+          });
+
+          const r = await manager.exec(nid, `mkdir -p ${stateDir}; ${exposeCmds.join('; ')}; echo "exposed ${ports.length} services on ${nid}"`);
+          exposeResults.push(`${nid}: exposed ports [${ports.join(', ')}] → mesh (${r.stdout.trim()})`);
+        }
+
+        return okBrief(`mesh sync complete:\n${exposeResults.join('\n')}`);
       }
 
       return fail('invalid action');

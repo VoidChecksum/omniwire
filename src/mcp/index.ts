@@ -17,13 +17,16 @@ import { getManifests } from '../sync/manifest.js';
 import { allNodes } from '../protocol/config.js';
 import { DEFAULT_SYNC_CONFIG } from '../sync/types.js';
 import type { SyncConfig } from '../sync/types.js';
+import { startEventServer, eventBus } from './events.js';
 
 const args = process.argv.slice(2);
 const useStdio = args.includes('--stdio');
 const useJson = args.includes('--json');
 const ssePort = parseInt(args.find((a) => a.startsWith('--sse-port='))?.split('=')[1] ?? '3200');
 const restPort = parseInt(args.find((a) => a.startsWith('--rest-port='))?.split('=')[1] ?? '3201');
+const eventPort = parseInt(args.find((a) => a.startsWith('--event-port='))?.split('=')[1] ?? '3202');
 const noSync = args.includes('--no-sync');
+const noEvents = args.includes('--no-events');
 
 function log(msg: string, data?: Record<string, unknown>): void {
   if (useJson) {
@@ -70,12 +73,28 @@ async function main(): Promise<void> {
     }
   }
 
+  // Start auto-update background checker (non-blocking, unref'd timer)
+  const noAutoUpdate = args.includes('--no-auto-update');
+  if (!noAutoUpdate) {
+    try {
+      const { startAutoUpdate } = await import('../update.js');
+      startAutoUpdate(3_600_000, (result) => {
+        if (result.updated) log(`auto-updated: ${result.message}`, { autoUpdate: true, version: result.latestVersion });
+      });
+      log('auto-update: enabled (1h interval)');
+    } catch { /* non-critical — continue without auto-update */ }
+  }
+
   if (useStdio) {
     const transport = new StdioServerTransport();
     await server.connect(transport);
   } else {
     startSSEServer(server, ssePort);
     startRESTServer(manager, transfer, restPort);
+    if (!noEvents) {
+      startEventServer(eventPort);
+      log(`Events: WS+SSE+Webhooks on :${eventPort}`, { eventPort });
+    }
     log(`OmniWire MCP: SSE on :${ssePort}, REST on :${restPort}`, { ssePort, restPort });
   }
 

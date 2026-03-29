@@ -54,13 +54,13 @@
 
   <!-- Stats bar -->
   <g font-family="'Segoe UI Mono', 'SF Mono', monospace" font-size="12" fill="#1A3A5C" opacity="0.6">
-    <text x="112" y="175" text-anchor="middle">75+ MCP Tools</text>
+    <text x="112" y="175" text-anchor="middle">81 MCP Tools</text>
     <text x="250" y="175" text-anchor="middle">A2A Protocol</text>
-    <text x="375" y="175" text-anchor="middle">VPN Routing</text>
+    <text x="375" y="175" text-anchor="middle">OmniMesh</text>
     <text x="490" y="175" text-anchor="middle">nftables FW</text>
     <text x="612" y="175" text-anchor="middle">CyberBase</text>
     <text x="728" y="175" text-anchor="middle">~80ms</text>
-    <text x="815" y="175" text-anchor="middle">v3.0</text>
+    <text x="815" y="175" text-anchor="middle">v3.1</text>
   </g>
 
   <!-- Separator dots between stats -->
