@@ -160,7 +160,7 @@ function dispatchBg(node: string, label: string, fn: () => Promise<McpResult>): 
 export function createOmniWireServer(manager: NodeManager, transfer: TransferEngine): McpServer {
   const server = new McpServer({
     name: 'omniwire',
-    version: '2.6.1',
+    version: '2.7.0',
   });
 
   // -- Auto-inject `background` param into every tool -------------------------
@@ -1301,7 +1301,316 @@ tags: ${meshNode.tags.join(', ')}`;
     }
   );
 
-  // --- Tool 31: omniwire_clipboard ---
+  // --- Tool 31: omniwire_firewall ---
+  server.tool(
+    'omniwire_firewall',
+    'Firewall engine for mesh nodes. Hardens external-facing security while keeping mesh traffic at full speed. Uses nftables (zero-copy, kernel-level). Mesh interfaces (wg0, wg1, tailscale0) are always whitelisted.',
+    {
+      action: z.enum([
+        'status', 'harden', 'unharden', 'rule-add', 'rule-del', 'rule-list',
+        'rate-limit', 'geo-block', 'port-knock', 'whitelist', 'blacklist',
+        'preset', 'flush', 'save', 'restore', 'audit', 'ban', 'unban'
+      ]).describe('status=show rules, harden=apply security preset, unharden=remove hardening, rule-add/del/list=manual rules, rate-limit=configure, geo-block=by country, port-knock=setup, whitelist/blacklist=IP lists, preset=named configs, flush=clear all, save/restore=persist, audit=show blocked traffic log, ban/unban=IP'),
+      node: z.string().optional().describe('Target node (default: contabo). Use "all" for all nodes.'),
+      rule: z.string().optional().describe('Rule spec. For rule-add: "input tcp 8080 accept", "input tcp 22 drop src=1.2.3.4", "output udp 53 accept". For rate-limit: "ssh 5/min", "http 100/sec". For geo-block: "CN,RU,KP" (ISO codes). For port-knock: "7000,8000,9000->22". For ban/unban: IP address. For preset: "paranoid", "server", "minimal", "pentest".'),
+      config: z.string().optional().describe('Additional config. For whitelist/blacklist: IP or CIDR. For preset: override options.'),
+    },
+    async ({ action, node, rule, config }) => {
+      const targetNodes = node === 'all' ? manager.getOnlineNodes().filter(n => n !== 'windows') : [node ?? 'contabo'];
+
+      // Mesh-safe preamble: ALWAYS allow mesh traffic before any hardening
+      const meshWhitelist = [
+        'nft add rule inet omniwire input iifname "wg0" accept 2>/dev/null',
+        'nft add rule inet omniwire input iifname "wg1" accept 2>/dev/null',
+        'nft add rule inet omniwire input iifname "tailscale0" accept 2>/dev/null',
+        'nft add rule inet omniwire input ip saddr 10.10.0.0/24 accept 2>/dev/null',
+        'nft add rule inet omniwire input ip saddr 10.20.0.0/24 accept 2>/dev/null',
+        'nft add rule inet omniwire input ip saddr 100.64.0.0/10 accept 2>/dev/null',
+        'nft add rule inet omniwire output oifname "wg0" accept 2>/dev/null',
+        'nft add rule inet omniwire output oifname "wg1" accept 2>/dev/null',
+        'nft add rule inet omniwire output oifname "tailscale0" accept 2>/dev/null',
+      ].join('; ');
+
+      const ensureTable = 'nft list table inet omniwire >/dev/null 2>&1 || nft add table inet omniwire; ' +
+        'nft list chain inet omniwire input >/dev/null 2>&1 || nft add chain inet omniwire input { type filter hook input priority 0\\; policy accept\\; }; ' +
+        'nft list chain inet omniwire output >/dev/null 2>&1 || nft add chain inet omniwire output { type filter hook output priority 0\\; policy accept\\; }; ' +
+        'nft list chain inet omniwire forward >/dev/null 2>&1 || nft add chain inet omniwire forward { type filter hook forward priority 0\\; policy accept\\; }';
+
+      if (action === 'status') {
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, 'nft list table inet omniwire 2>/dev/null || echo "no omniwire table"; echo "---iptables---"; iptables -L -n --line-numbers 2>/dev/null | head -30');
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'harden') {
+        const preset = rule ?? 'server';
+        const presets: Record<string, string> = {
+          // Server preset: SSH rate-limit, drop invalid, allow established, block common attack ports
+          server: [
+            ensureTable,
+            meshWhitelist,
+            // Allow loopback
+            'nft add rule inet omniwire input iifname "lo" accept',
+            // Allow established/related
+            'nft add rule inet omniwire input ct state established,related accept',
+            // Drop invalid
+            'nft add rule inet omniwire input ct state invalid drop',
+            // SSH rate limit: 5 new connections per minute per source IP
+            'nft add rule inet omniwire input tcp dport 22 ct state new meter ssh-meter { ip saddr limit rate 5/minute } accept',
+            'nft add rule inet omniwire input tcp dport 22 ct state new drop',
+            // Allow HTTP/HTTPS
+            'nft add rule inet omniwire input tcp dport { 80, 443 } accept',
+            // Allow DNS
+            'nft add rule inet omniwire input udp dport 53 accept',
+            'nft add rule inet omniwire input tcp dport 53 accept',
+            // Allow ICMP (ping) rate-limited
+            'nft add rule inet omniwire input icmp type echo-request limit rate 10/second accept',
+            'nft add rule inet omniwire input icmp type echo-request drop',
+            // Drop port scans (SYN without ACK to closed ports)
+            'nft add rule inet omniwire input tcp flags syn / syn,ack,fin,rst ct state new log prefix "SYN-SCAN: " limit rate 5/minute drop',
+            // Block common attack ports
+            'nft add rule inet omniwire input tcp dport { 23, 445, 1433, 1521, 3306, 3389, 5432, 6379, 9200, 27017 } drop',
+            // Log and drop everything else
+            'nft add rule inet omniwire input log prefix "FW-DROP: " limit rate 10/minute drop',
+            // Set default policy to drop
+            'nft chain inet omniwire input { policy drop\\; }',
+          ].join('; '),
+
+          // Paranoid: everything blocked except mesh + SSH
+          paranoid: [
+            ensureTable,
+            'nft flush chain inet omniwire input 2>/dev/null',
+            meshWhitelist,
+            'nft add rule inet omniwire input iifname "lo" accept',
+            'nft add rule inet omniwire input ct state established,related accept',
+            'nft add rule inet omniwire input ct state invalid drop',
+            'nft add rule inet omniwire input tcp dport 22 ct state new meter ssh-paranoid { ip saddr limit rate 3/minute } accept',
+            'nft add rule inet omniwire input tcp dport 22 ct state new drop',
+            'nft add rule inet omniwire input icmp type echo-request limit rate 2/second accept',
+            'nft add rule inet omniwire input log prefix "PARANOID-DROP: " limit rate 5/minute drop',
+            'nft chain inet omniwire input { policy drop\\; }',
+          ].join('; '),
+
+          // Minimal: just rate-limiting and invalid drop, no policy change
+          minimal: [
+            ensureTable,
+            meshWhitelist,
+            'nft add rule inet omniwire input ct state invalid drop',
+            'nft add rule inet omniwire input tcp dport 22 ct state new meter ssh-min { ip saddr limit rate 10/minute } accept',
+            'nft add rule inet omniwire input icmp type echo-request limit rate 20/second accept',
+          ].join('; '),
+
+          // Pentest: allow all outbound, harden inbound, keep common tool ports open
+          pentest: [
+            ensureTable,
+            meshWhitelist,
+            'nft add rule inet omniwire input iifname "lo" accept',
+            'nft add rule inet omniwire input ct state established,related accept',
+            'nft add rule inet omniwire input ct state invalid drop',
+            'nft add rule inet omniwire input tcp dport 22 ct state new meter ssh-pt { ip saddr limit rate 5/minute } accept',
+            'nft add rule inet omniwire input tcp dport 22 ct state new drop',
+            // Allow callback ports for reverse shells during pentests
+            'nft add rule inet omniwire input tcp dport { 80, 443, 4444, 8080, 8443, 9001 } accept',
+            'nft add rule inet omniwire input udp dport { 53, 69 } accept',
+            // Allow all outbound (needed for scanning)
+            'nft add rule inet omniwire output accept',
+            'nft add rule inet omniwire input log prefix "PT-DROP: " limit rate 10/minute drop',
+            'nft chain inet omniwire input { policy drop\\; }',
+          ].join('; '),
+        };
+
+        const presetCmd = presets[preset];
+        if (!presetCmd) return fail(`Unknown preset: ${preset}. Available: server, paranoid, minimal, pentest`);
+
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, presetCmd + '; echo "---status---"; nft list chain inet omniwire input 2>/dev/null | wc -l');
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'unharden') {
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, 'nft flush table inet omniwire 2>/dev/null; nft chain inet omniwire input { policy accept\\; } 2>/dev/null; nft chain inet omniwire output { policy accept\\; } 2>/dev/null; nft chain inet omniwire forward { policy accept\\; } 2>/dev/null; echo "firewall relaxed"');
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'rule-add' && rule) {
+        // Parse: "input tcp 8080 accept" or "input tcp 22 drop src=1.2.3.4"
+        const parts = rule.split(/\s+/);
+        const chain = parts[0] ?? 'input'; // input/output/forward
+        const proto = parts[1] ?? 'tcp';
+        const port = parts[2] ?? '';
+        const verdict = parts[3] ?? 'accept';
+        const srcMatch = rule.match(/src=(\S+)/);
+
+        let nftCmd = `${ensureTable}; ${meshWhitelist}; nft add rule inet omniwire ${chain}`;
+        if (proto) nftCmd += ` ${proto} dport ${port}`;
+        if (srcMatch) nftCmd += ` ip saddr ${srcMatch[1]}`;
+        nftCmd += ` ${verdict}`;
+
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, nftCmd);
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'rule-del' && rule) {
+        // rule = handle number or pattern
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, `nft -a list chain inet omniwire input 2>/dev/null | grep "${rule}" | awk '{print $NF}' | while read h; do nft delete rule inet omniwire input handle "$h"; done; echo "deleted rules matching: ${rule}"`);
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'rule-list') {
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, 'nft -a list table inet omniwire 2>/dev/null || echo "no rules"');
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'rate-limit' && rule) {
+        // rule = "ssh 5/min" or "http 100/sec"
+        const [service, rate] = rule.split(/\s+/);
+        const portMap: Record<string, string> = { ssh: '22', http: '80', https: '443', dns: '53', smtp: '25' };
+        const port = portMap[service] ?? service;
+        const nftCmd = `${ensureTable}; ${meshWhitelist}; nft add rule inet omniwire input tcp dport ${port} ct state new meter rate-${service} { ip saddr limit rate ${rate} } accept; nft add rule inet omniwire input tcp dport ${port} ct state new drop`;
+
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, nftCmd);
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'geo-block' && rule) {
+        // rule = "CN,RU,KP" — uses ipset with country IP ranges
+        const countries = rule.toUpperCase().split(',').map(c => c.trim());
+        const geoScript = countries.map(cc =>
+          `curl -sf "https://www.ipdeny.com/ipblocks/data/aggregated/${cc.toLowerCase()}-aggregated-zone" 2>/dev/null | while read cidr; do nft add element inet omniwire geoblock { "$cidr" } 2>/dev/null; done`
+        ).join('; ');
+
+        const cmd = `${ensureTable}; nft add set inet omniwire geoblock { type ipv4_addr\\; flags interval\\; } 2>/dev/null; ${geoScript}; nft add rule inet omniwire input ip saddr @geoblock drop 2>/dev/null; echo "geo-blocked: ${countries.join(',')}"`;
+
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, cmd);
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'port-knock' && rule) {
+        // rule = "7000,8000,9000->22" — knock sequence to open SSH
+        const match = rule.match(/^([\d,]+)->(\d+)$/);
+        if (!match) return fail('Format: "port1,port2,port3->target_port" e.g. "7000,8000,9000->22"');
+        const ports = match[1].split(',');
+        const target = match[2];
+
+        // Uses nftables recent match simulation with sets and timeouts
+        const knockScript = `${ensureTable};
+nft add set inet omniwire knock1 { type ipv4_addr\\; timeout 10s\\; } 2>/dev/null;
+nft add set inet omniwire knock2 { type ipv4_addr\\; timeout 10s\\; } 2>/dev/null;
+nft add set inet omniwire knock3 { type ipv4_addr\\; timeout 15s\\; } 2>/dev/null;
+nft add rule inet omniwire input tcp dport ${ports[0]} add @knock1 { ip saddr } drop 2>/dev/null;
+nft add rule inet omniwire input ip saddr @knock1 tcp dport ${ports[1]} add @knock2 { ip saddr } drop 2>/dev/null;
+nft add rule inet omniwire input ip saddr @knock2 tcp dport ${ports[2]} add @knock3 { ip saddr } drop 2>/dev/null;
+nft add rule inet omniwire input ip saddr @knock3 tcp dport ${target} accept 2>/dev/null;
+echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
+
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, knockScript.replace(/\n/g, ' '));
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'whitelist' && (rule || config)) {
+        const ip = rule ?? config!;
+        const cmd = `${ensureTable}; ${meshWhitelist}; nft add rule inet omniwire input ip saddr ${ip} accept; echo "whitelisted ${ip}"`;
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, cmd);
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'blacklist' && (rule || config)) {
+        const ip = rule ?? config!;
+        const cmd = `${ensureTable}; nft insert rule inet omniwire input ip saddr ${ip} drop; echo "blacklisted ${ip}"`;
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, cmd);
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'ban' && rule) {
+        const cmd = `${ensureTable}; nft insert rule inet omniwire input ip saddr ${rule} counter drop; nft insert rule inet omniwire output ip daddr ${rule} counter drop; echo "banned ${rule} (in+out)"`;
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, cmd);
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'unban' && rule) {
+        const cmd = `nft -a list table inet omniwire 2>/dev/null | grep "${rule}" | awk '{print $NF}' | while read h; do for chain in input output forward; do nft delete rule inet omniwire "$chain" handle "$h" 2>/dev/null; done; done; echo "unbanned ${rule}"`;
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, cmd);
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'flush') {
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, 'nft flush table inet omniwire 2>/dev/null; echo "flushed all rules"');
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'save') {
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, 'nft list table inet omniwire > /etc/omniwire/firewall.nft 2>/dev/null && echo "saved to /etc/omniwire/firewall.nft" || echo "no rules to save"');
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'restore') {
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, 'nft -f /etc/omniwire/firewall.nft 2>/dev/null && echo "restored" || echo "no saved rules"');
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'audit') {
+        const results = await Promise.all(targetNodes.map(async (n) => {
+          const r = await manager.exec(n, 'journalctl -k --no-pager -n 50 2>/dev/null | grep -E "FW-DROP|SYN-SCAN|PARANOID|PT-DROP" | tail -20 || dmesg | grep -E "FW-DROP|SYN-SCAN" | tail -20 || echo "no blocked traffic logged"');
+          return { ...r, nodeId: n };
+        }));
+        return multiResult(results);
+      }
+
+      if (action === 'preset') {
+        return okBrief('Available presets:\n- server: SSH rate-limit, drop invalid, block DB ports, allow HTTP/HTTPS\n- paranoid: block everything except mesh + SSH (3/min)\n- minimal: just rate-limiting, no policy change\n- pentest: harden inbound, allow outbound + callback ports (4444, 8080, etc)');
+      }
+
+      return fail('Invalid action or missing params');
+    }
+  );
+
+  // --- Tool 32: omniwire_clipboard ---
   server.tool(
     'omniwire_clipboard',
     'Copy text between nodes via a shared clipboard buffer.',

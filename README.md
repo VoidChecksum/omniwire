@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0D1117" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP_Tools-55-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
+  <img src="https://img.shields.io/badge/MCP_Tools-56-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
   <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&labelColor=0D1117" alt="A2A" />
   <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
   <img src="https://img.shields.io/badge/Background-Dispatch-CC93E6?style=for-the-badge&labelColor=0D1117" alt="background" />
@@ -206,7 +206,7 @@ graph TB
         direction TB
         MCP["MCP Protocol Layer<br/>stdio | SSE | REST"]
 
-        subgraph tools["55 Tools"]
+        subgraph tools["56 Tools"]
             direction LR
             EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline  bg"]
             AGENT["Agentic<br/>store  watch  task<br/>a2a  events  locks"]
@@ -340,7 +340,7 @@ watch(assert="ready")       poll until
 
 ---
 
-## All 55 Tools
+## All 56 Tools
 
 > **Every tool** supports `background: true` -- returns a task ID immediately. Poll with `omniwire_bg`.
 
@@ -408,10 +408,11 @@ watch(assert="ready")       poll until
 | `omniwire_git` | Git commands on repos on any node |
 | `omniwire_syslog` | Query journalctl with filters |
 
-### Network & VPN (6)
+### Network, VPN & Firewall (7)
 
 | Tool | Description |
 |------|-------------|
+| `omniwire_firewall` | nftables firewall engine. Presets (server/paranoid/pentest), rate-limit, geo-block, port-knock, ban/unban, audit. Mesh always whitelisted. |
 | `omniwire_vpn` | Manage VPN (Mullvad/OpenVPN/WireGuard/Tailscale). Split-tunnel + full-node modes. Mesh stays connected. |
 | `omniwire_port_forward` | Create/list/close SSH tunnels |
 | `omniwire_open_browser` | Open URL in browser on a node |
@@ -516,6 +517,15 @@ Create `~/.omniwire/mesh.json`:
 ## Changelog
 
 <details>
+<summary><b>v2.7.0 -- Firewall Engine</b></summary>
+
+**`omniwire_firewall`**: nftables-based firewall engine with 17 actions. Presets (server, paranoid, minimal, pentest), rate-limiting, geo-blocking by country, port-knocking sequences, IP ban/unban, whitelist/blacklist, rule management, audit log, save/restore.
+
+**Zero mesh impact**: wg0, wg1, tailscale0, and all mesh CIDRs (10.10.0.0/24, 10.20.0.0/24, 100.64.0.0/10) are always whitelisted before any hardening rules. nftables runs in kernel space — zero latency overhead.
+
+</details>
+
+<details>
 <summary><b>v2.6.0 -- VPN Integration, Mesh-Safe Anonymous Scanning</b></summary>
 
 **`omniwire_vpn`** tool: Mullvad, OpenVPN, WireGuard, Tailscale. Split-tunnel (per-command) + full-node modes. Mesh connectivity (wg0, wg1, Tailscale) always preserved via route exclusions and network namespace isolation.
@@ -529,7 +539,7 @@ Create `~/.omniwire/mesh.json`:
 <details>
 <summary><b>v2.5.1 -- Universal Background Dispatch</b></summary>
 
-**`background: true`** auto-injected into all 55 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
+**`background: true`** auto-injected into all 56 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
 
 </details>
 
@@ -568,7 +578,7 @@ Security fixes, multi-path SSH failover, CyberBase integration, VaultBridge Obsi
 ```
 omniwire/
   src/
-    mcp/           MCP server (55 tools, 3 transports)
+    mcp/           MCP server (56 tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
     sync/          CyberSync + CyberBase (PostgreSQL, Obsidian, encryption)
     protocol/      Mesh config, types, path parsing
