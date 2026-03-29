@@ -53,20 +53,24 @@
   <text x="450" y="130" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="20" font-weight="400" fill="#586069" text-anchor="middle">The infrastructure layer for AI agent swarms</text>
 
   <!-- Stats bar -->
-  <g font-family="'Segoe UI Mono', 'SF Mono', monospace" font-size="13" fill="#1A3A5C" opacity="0.6">
-    <text x="175" y="175" text-anchor="middle">75+ MCP Tools</text>
-    <text x="325" y="175" text-anchor="middle">A2A Protocol</text>
-    <text x="450" y="175" text-anchor="middle">~80ms Latency</text>
-    <text x="575" y="175" text-anchor="middle">LZ4 Transfer</text>
-    <text x="725" y="175" text-anchor="middle">AES-128-GCM</text>
+  <g font-family="'Segoe UI Mono', 'SF Mono', monospace" font-size="12" fill="#1A3A5C" opacity="0.6">
+    <text x="112" y="175" text-anchor="middle">75+ MCP Tools</text>
+    <text x="250" y="175" text-anchor="middle">A2A Protocol</text>
+    <text x="375" y="175" text-anchor="middle">VPN Routing</text>
+    <text x="490" y="175" text-anchor="middle">nftables FW</text>
+    <text x="612" y="175" text-anchor="middle">CyberBase</text>
+    <text x="728" y="175" text-anchor="middle">~80ms</text>
+    <text x="815" y="175" text-anchor="middle">v3.0</text>
   </g>
 
   <!-- Separator dots between stats -->
   <g fill="#1A3A5C" opacity="0.25">
-    <circle cx="250" cy="172" r="2"/>
-    <circle cx="387" cy="172" r="2"/>
-    <circle cx="513" cy="172" r="2"/>
-    <circle cx="650" cy="172" r="2"/>
+    <circle cx="182" cy="172" r="1.5"/>
+    <circle cx="313" cy="172" r="1.5"/>
+    <circle cx="432" cy="172" r="1.5"/>
+    <circle cx="550" cy="172" r="1.5"/>
+    <circle cx="670" cy="172" r="1.5"/>
+    <circle cx="770" cy="172" r="1.5"/>
   </g>
 
   <!-- Bottom wave -->
