@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0D1117" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP_Tools-54-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
+  <img src="https://img.shields.io/badge/MCP_Tools-55-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
   <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&labelColor=0D1117" alt="A2A" />
   <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
   <img src="https://img.shields.io/badge/Background-Dispatch-CC93E6?style=for-the-badge&labelColor=0D1117" alt="background" />
@@ -65,7 +65,7 @@ graph TB
         direction TB
         MCP["MCP Protocol Layer<br/>stdio | SSE | REST"]
 
-        subgraph tools["54 Tools"]
+        subgraph tools["55 Tools"]
             direction LR
             EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline  bg"]
             AGENT["Agentic<br/>store  watch  task<br/>a2a  events  locks"]
@@ -199,7 +199,7 @@ watch(assert="ready")       poll until
 
 ---
 
-## All 54 Tools
+## All 55 Tools
 
 > **Every tool** supports `background: true` -- returns a task ID immediately. Poll with `omniwire_bg`.
 
@@ -207,7 +207,7 @@ watch(assert="ready")       poll until
 
 | Tool | Description |
 |------|-------------|
-| `omniwire_exec` | Run command on any node. `retry`, `assert`, `store_as`, `format:"json"`, `{{key}}` interpolation. |
+| `omniwire_exec` | Run command on any node. `retry`, `assert`, `store_as`, `format:"json"`, `{{key}}`, `via_vpn` for anonymous scanning. |
 | `omniwire_run` | Execute multi-line scripts via temp file. Keeps tool call UI clean. |
 | `omniwire_batch` | N commands in 1 call. Chaining with `{{prev}}`, `abort_on_fail`, parallel or sequential. |
 | `omniwire_broadcast` | Execute on all nodes simultaneously. JSON format support. |
@@ -267,10 +267,11 @@ watch(assert="ready")       poll until
 | `omniwire_git` | Git commands on repos on any node |
 | `omniwire_syslog` | Query journalctl with filters |
 
-### Network & Misc (5)
+### Network & VPN (6)
 
 | Tool | Description |
 |------|-------------|
+| `omniwire_vpn` | Manage VPN (Mullvad/OpenVPN/WireGuard/Tailscale). Split-tunnel + full-node modes. Mesh stays connected. |
 | `omniwire_port_forward` | Create/list/close SSH tunnels |
 | `omniwire_open_browser` | Open URL in browser on a node |
 | `omniwire_shell` | Persistent PTY session (preserves cwd/env) |
@@ -374,9 +375,20 @@ Create `~/.omniwire/mesh.json`:
 ## Changelog
 
 <details>
+<summary><b>v2.6.0 -- VPN Integration, Mesh-Safe Anonymous Scanning</b></summary>
+
+**`omniwire_vpn`** tool: Mullvad, OpenVPN, WireGuard, Tailscale. Split-tunnel (per-command) + full-node modes. Mesh connectivity (wg0, wg1, Tailscale) always preserved via route exclusions and network namespace isolation.
+
+**`via_vpn` on exec**: Route any command through VPN using Linux network namespaces. Only the command's traffic goes through VPN — SSH/WireGuard mesh stays on real interface.
+
+**Modes**: `connect` (split-tunnel), `full-on` (node-wide with mesh exclusions), `rotate` (new exit IP), `status`, `list`, `ip`.
+
+</details>
+
+<details>
 <summary><b>v2.5.1 -- Universal Background Dispatch</b></summary>
 
-**`background: true`** auto-injected into all 54 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
+**`background: true`** auto-injected into all 55 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
 
 </details>
 
@@ -415,7 +427,7 @@ Security fixes, multi-path SSH failover, CyberBase integration, VaultBridge Obsi
 ```
 omniwire/
   src/
-    mcp/           MCP server (54 tools, 3 transports)
+    mcp/           MCP server (55 tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
     sync/          CyberSync + CyberBase (PostgreSQL, Obsidian, encryption)
     protocol/      Mesh config, types, path parsing

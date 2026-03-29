@@ -1,6 +1,6 @@
 {
   "name": "omniwire",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "description": "Infrastructure layer for AI agent swarms — 54 MCP tools · A2A protocol · background dispatch · ~80ms latency · LZ4 transfers",
   "type": "module",
   "bin": {

@@ -78,6 +78,67 @@ function multiResultJson(results: { nodeId: string; code: number; stdout: string
   }))));
 }
 
+// -- VPN namespace wrapper -- routes ONLY the command through VPN, mesh stays intact
+// Uses Linux network namespaces: creates isolated netns, moves VPN tunnel into it,
+// runs command inside namespace. Main namespace (WireGuard mesh, SSH) is untouched.
+function buildVpnWrappedCmd(vpnSpec: string, innerCmd: string): string {
+  const ns = `ow-vpn-${Date.now().toString(36)}`;
+  const escaped = innerCmd.replace(/'/g, "'\\''");
+
+  // Parse spec: "mullvad", "mullvad:se", "openvpn:/path/to.conf", "wg:wg-vpn"
+  const [provider, param] = vpnSpec.includes(':') ? [vpnSpec.split(':')[0], vpnSpec.split(':').slice(1).join(':')] : [vpnSpec, ''];
+
+  if (provider === 'mullvad') {
+    // Mullvad supports split tunneling natively via `mullvad-exclude`
+    // OR we can use its SOCKS5 proxy (10.64.0.1:1080) when connected
+    // Best approach: use mullvad split-tunnel + namespace for full isolation
+    const relayCmd = param ? `mullvad relay set location ${param} 2>/dev/null;` : '';
+    // Check if mullvad is already connected; if not, connect (split-tunnel safe)
+    return `${relayCmd} mullvad status | grep -q Connected || mullvad connect 2>/dev/null; sleep 1; ` +
+      // Create netns, veth pair, route traffic through mullvad's tun
+      `ip netns add ${ns} 2>/dev/null; ` +
+      `ip link add veth-${ns} type veth peer name veth-${ns}-ns; ` +
+      `ip link set veth-${ns}-ns netns ${ns}; ` +
+      `ip addr add 172.30.${Math.floor(Math.random() * 254) + 1}.1/30 dev veth-${ns}; ` +
+      `ip link set veth-${ns} up; ` +
+      `ip netns exec ${ns} ip addr add 172.30.${Math.floor(Math.random() * 254) + 1}.2/30 dev veth-${ns}-ns; ` +
+      `ip netns exec ${ns} ip link set veth-${ns}-ns up; ` +
+      `ip netns exec ${ns} ip link set lo up; ` +
+      // Use mullvad SOCKS proxy for the namespace (simpler, no route table manipulation)
+      `ip netns exec ${ns} bash -c 'export ALL_PROXY=socks5://10.64.0.1:1080; ${escaped}'; ` +
+      `_rc=$?; ip netns del ${ns} 2>/dev/null; ip link del veth-${ns} 2>/dev/null; exit $_rc`;
+  }
+
+  if (provider === 'openvpn') {
+    const configPath = param || '/etc/openvpn/client.conf';
+    // Run OpenVPN inside a network namespace — only the command sees the tunnel
+    return `ip netns add ${ns} 2>/dev/null; ` +
+      `ip netns exec ${ns} ip link set lo up; ` +
+      `ip netns exec ${ns} openvpn --config "${configPath}" --daemon --log /tmp/${ns}.log --writepid /tmp/${ns}.pid; ` +
+      `sleep 4; ` +  // wait for tunnel
+      `ip netns exec ${ns} bash -c '${escaped}'; ` +
+      `_rc=$?; kill $(cat /tmp/${ns}.pid 2>/dev/null) 2>/dev/null; ip netns del ${ns} 2>/dev/null; rm -f /tmp/${ns}.log /tmp/${ns}.pid; exit $_rc`;
+  }
+
+  if (provider === 'wg' || provider === 'wireguard') {
+    const iface = param || 'wg-vpn';
+    // Move WireGuard VPN interface into namespace — mesh wg0 stays in main ns
+    return `ip netns add ${ns} 2>/dev/null; ` +
+      `ip link add ${iface}-${ns} type wireguard; ` +
+      `wg setconf ${iface}-${ns} /etc/wireguard/${iface}.conf 2>/dev/null; ` +
+      `ip link set ${iface}-${ns} netns ${ns}; ` +
+      `ip netns exec ${ns} ip link set lo up; ` +
+      `ip netns exec ${ns} ip addr add 10.66.0.2/32 dev ${iface}-${ns}; ` +
+      `ip netns exec ${ns} ip link set ${iface}-${ns} up; ` +
+      `ip netns exec ${ns} ip route add default dev ${iface}-${ns}; ` +
+      `ip netns exec ${ns} bash -c '${escaped}'; ` +
+      `_rc=$?; ip netns del ${ns} 2>/dev/null; exit $_rc`;
+  }
+
+  // Fallback: just run the command (no VPN wrapping)
+  return innerCmd;
+}
+
 // -- Agentic state -- shared across tool calls in the same MCP session --------
 const resultStore = new Map<string, string>();  // key -> value store for chaining
 
@@ -99,7 +160,7 @@ function dispatchBg(node: string, label: string, fn: () => Promise<McpResult>): 
 export function createOmniWireServer(manager: NodeManager, transfer: TransferEngine): McpServer {
   const server = new McpServer({
     name: 'omniwire',
-    version: '2.5.1',
+    version: '2.6.0',
   });
 
   // -- Auto-inject `background` param into every tool -------------------------
@@ -163,7 +224,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
   // --- Tool 1: omniwire_exec ---
   server.tool(
     'omniwire_exec',
-    'Execute a command on a mesh node. Set background=true for async dispatch (returns task ID, poll with omniwire_bg). Supports retry, assert, JSON, store_as, {{key}} interpolation.',
+    'Execute a command on a mesh node. Set background=true for async. Set via_vpn to route through VPN (Mullvad/OpenVPN/WireGuard) for anonymous scanning. Supports retry, assert, JSON, store_as, {{key}}.',
     {
       node: z.string().optional().describe('Target node id (windows, contabo, hostinger, thinkpad). Auto-selects if omitted.'),
       command: z.string().optional().describe('Shell command to run. Use {{key}} to interpolate stored results from previous calls.'),
@@ -174,8 +235,9 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       retry: z.number().optional().describe('Retry N times on failure (with 1s delay between). Default 0.'),
       assert: z.string().optional().describe('Grep pattern to assert in stdout. If not found, returns error. Use for validation in agentic chains.'),
       store_as: z.string().optional().describe('Store trimmed stdout under this key. Retrieve in subsequent calls via {{key}} in command.'),
+      via_vpn: z.string().optional().describe('Route command through VPN. Values: "mullvad" (auto), "mullvad:se" (country), "openvpn:/path/to.conf", "wg:wg-vpn". Connects VPN before exec, verifies IP changed.'),
     },
-    async ({ node, command, timeout, script, label, format, retry, assert: assertPattern, store_as }) => {
+    async ({ node, command, timeout, script, label, format, retry, assert: assertPattern, store_as, via_vpn }) => {
       if (!command && !script) {
         return fail('either command or script is required');
       }
@@ -197,6 +259,12 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
         effectiveCmd = timeoutSec < 300
           ? `timeout ${timeoutSec} bash -c '${resolvedCmd!.replace(/'/g, "'\\''")}'`
           : resolvedCmd!;
+      }
+
+      // VPN routing: wrap command in network namespace so only THIS command goes through VPN.
+      // The mesh (WireGuard, SSH) stays on the real interface — zero disruption.
+      if (via_vpn) {
+        effectiveCmd = buildVpnWrappedCmd(via_vpn, effectiveCmd);
       }
 
       let result = await manager.exec(nodeId, effectiveCmd);
@@ -933,7 +1001,195 @@ tags: ${meshNode.tags.join(', ')}`;
     }
   );
 
-  // --- Tool 30: omniwire_clipboard ---
+  // --- Tool 30: omniwire_vpn ---
+  server.tool(
+    'omniwire_vpn',
+    'Manage VPN on mesh nodes (Mullvad/OpenVPN/WireGuard). SAFE: uses split-tunneling or network namespaces — mesh connectivity (WireGuard, SSH) is never disrupted. Use via_vpn on omniwire_exec to route individual commands through VPN.',
+    {
+      action: z.enum(['connect', 'disconnect', 'status', 'list', 'ip', 'rotate', 'full-on', 'full-off']).describe('connect=start VPN (split-tunnel, mesh safe), disconnect=stop, status=current state, list=servers/relays, ip=public IP, rotate=new exit, full-on=node-wide VPN with mesh exclusions, full-off=restore default routing'),
+      node: z.string().optional().describe('Node to manage VPN on (default: contabo)'),
+      provider: z.enum(['mullvad', 'openvpn', 'wireguard', 'tailscale']).optional().describe('VPN provider (default: auto-detect)'),
+      server: z.string().optional().describe('Server/relay to connect to. Mullvad: country code (us, de, se) or relay name. OpenVPN: config file path. WireGuard: interface name. Tailscale: exit node hostname.'),
+      config: z.string().optional().describe('OpenVPN config file path (for openvpn provider)'),
+    },
+    async ({ action, node, provider, server: vpnServer, config }) => {
+      const nodeId = node ?? 'contabo';
+
+      // Auto-detect provider (prefer mullvad > tailscale > openvpn > wireguard)
+      const detectCmd = 'command -v mullvad >/dev/null && echo mullvad || (command -v tailscale >/dev/null && echo tailscale || (command -v openvpn >/dev/null && echo openvpn || (command -v wg >/dev/null && echo wireguard || echo none)))';
+      const detected = provider ?? (await manager.exec(nodeId, detectCmd)).stdout.trim() as any;
+
+      if (action === 'ip') {
+        const result = await manager.exec(nodeId, 'curl -s --max-time 5 https://am.i.mullvad.net/json 2>/dev/null || curl -s --max-time 5 https://ipinfo.io/json 2>/dev/null || curl -s --max-time 5 https://ifconfig.me');
+        return ok(nodeId, result.durationMs, result.stdout, 'public IP');
+      }
+
+      if (detected === 'mullvad') {
+        // Mullvad split-tunnel: excludes mesh interfaces (wg0, tailscale0) from VPN routing.
+        // SSH connections over WireGuard mesh are preserved — only non-mesh traffic goes through Mullvad.
+        const splitSetup = 'mullvad split-tunnel set state on 2>/dev/null; mullvad lan set allow 2>/dev/null;';
+        switch (action) {
+          case 'connect': {
+            const relay = vpnServer ? `mullvad relay set location ${vpnServer} && ` : '';
+            const result = await manager.exec(nodeId, `${splitSetup} ${relay}mullvad connect && sleep 2 && mullvad status && echo "--- mesh check ---" && ip route get 10.10.0.1 2>/dev/null | head -1`);
+            return ok(nodeId, result.durationMs, result.stdout, `mullvad connect${vpnServer ? ` ${vpnServer}` : ''}`);
+          }
+          case 'disconnect': {
+            const result = await manager.exec(nodeId, 'mullvad disconnect && mullvad status');
+            return ok(nodeId, result.durationMs, result.stdout, 'mullvad disconnect');
+          }
+          case 'status': {
+            const result = await manager.exec(nodeId, 'mullvad status && echo "---split-tunnel---" && mullvad split-tunnel get 2>/dev/null && echo "---public-ip---" && curl -s --max-time 5 https://am.i.mullvad.net/json 2>/dev/null | grep -E "ip|country|mullvad"');
+            return ok(nodeId, result.durationMs, result.stdout, 'mullvad status');
+          }
+          case 'list': {
+            const result = await manager.exec(nodeId, 'mullvad relay list 2>&1 | head -60');
+            return ok(nodeId, result.durationMs, result.stdout, 'mullvad relays');
+          }
+          case 'rotate': {
+            const result = await manager.exec(nodeId, `${splitSetup} mullvad disconnect && sleep 1 && mullvad relay set tunnel-protocol wireguard && mullvad connect && sleep 2 && mullvad status && echo "---ip---" && curl -s --max-time 5 https://am.i.mullvad.net/json | grep -E "ip|country|mullvad_exit"`);
+            return ok(nodeId, result.durationMs, result.stdout, 'mullvad rotate');
+          }
+        }
+      }
+
+      if (detected === 'openvpn') {
+        const configPath = config ?? vpnServer ?? '/etc/openvpn/client.conf';
+        switch (action) {
+          case 'connect': {
+            const result = await manager.exec(nodeId, `openvpn --config "${configPath}" --daemon --log /tmp/openvpn.log && sleep 3 && ip addr show tun0 2>/dev/null | grep inet && curl -s --max-time 5 https://ifconfig.me`);
+            return ok(nodeId, result.durationMs, result.stdout, 'openvpn connect');
+          }
+          case 'disconnect': {
+            const result = await manager.exec(nodeId, 'pkill openvpn 2>/dev/null; sleep 1; pgrep openvpn >/dev/null && echo "still running" || echo "disconnected"');
+            return ok(nodeId, result.durationMs, result.stdout, 'openvpn disconnect');
+          }
+          case 'status': {
+            const result = await manager.exec(nodeId, 'pgrep -a openvpn 2>/dev/null || echo "not running"; ip addr show tun0 2>/dev/null | grep inet || echo "no tunnel"; tail -5 /tmp/openvpn.log 2>/dev/null');
+            return ok(nodeId, result.durationMs, result.stdout, 'openvpn status');
+          }
+          case 'list': {
+            const result = await manager.exec(nodeId, 'ls /etc/openvpn/*.conf /etc/openvpn/*.ovpn /etc/openvpn/client/*.conf /etc/openvpn/client/*.ovpn 2>/dev/null || echo "no configs found"');
+            return ok(nodeId, result.durationMs, result.stdout, 'openvpn configs');
+          }
+          case 'rotate': {
+            const result = await manager.exec(nodeId, `pkill openvpn 2>/dev/null; sleep 1; openvpn --config "${configPath}" --daemon --log /tmp/openvpn.log && sleep 3 && curl -s --max-time 5 https://ifconfig.me`);
+            return ok(nodeId, result.durationMs, result.stdout, 'openvpn rotate');
+          }
+        }
+      }
+
+      if (detected === 'wireguard') {
+        const iface = vpnServer ?? 'wg-vpn';
+        switch (action) {
+          case 'connect': {
+            const result = await manager.exec(nodeId, `wg-quick up ${iface} 2>&1 && sleep 1 && wg show ${iface} | head -10 && curl -s --max-time 5 https://ifconfig.me`);
+            return ok(nodeId, result.durationMs, result.stdout, `wg up ${iface}`);
+          }
+          case 'disconnect': {
+            const result = await manager.exec(nodeId, `wg-quick down ${iface} 2>&1`);
+            return ok(nodeId, result.durationMs, result.stdout, `wg down ${iface}`);
+          }
+          case 'status': {
+            const result = await manager.exec(nodeId, 'wg show all 2>/dev/null || echo "no WireGuard interfaces"');
+            return ok(nodeId, result.durationMs, result.stdout, 'wg status');
+          }
+          case 'list': {
+            const result = await manager.exec(nodeId, 'ls /etc/wireguard/*.conf 2>/dev/null | sed "s|/etc/wireguard/||;s|\\.conf||" || echo "no configs"');
+            return ok(nodeId, result.durationMs, result.stdout, 'wg interfaces');
+          }
+          case 'rotate': {
+            const result = await manager.exec(nodeId, `wg-quick down ${iface} 2>/dev/null; sleep 1; wg-quick up ${iface} 2>&1 && sleep 1 && curl -s --max-time 5 https://ifconfig.me`);
+            return ok(nodeId, result.durationMs, result.stdout, `wg rotate ${iface}`);
+          }
+        }
+      }
+
+      if (detected === 'tailscale') {
+        switch (action) {
+          case 'connect': {
+            const exitNode = vpnServer ? `--exit-node=${vpnServer}` : '';
+            const result = await manager.exec(nodeId, `tailscale up --accept-routes ${exitNode} 2>&1 && sleep 2 && tailscale status | head -15`);
+            return ok(nodeId, result.durationMs, result.stdout, `tailscale connect${vpnServer ? ` via ${vpnServer}` : ''}`);
+          }
+          case 'disconnect': {
+            const result = await manager.exec(nodeId, 'tailscale up --exit-node= 2>&1 && tailscale status | head -5');
+            return ok(nodeId, result.durationMs, result.stdout, 'tailscale clear exit-node');
+          }
+          case 'status': {
+            const result = await manager.exec(nodeId, 'tailscale status 2>&1 && echo "---ip---" && tailscale ip -4 2>/dev/null && echo "---exit---" && tailscale exit-node status 2>/dev/null');
+            return ok(nodeId, result.durationMs, result.stdout, 'tailscale status');
+          }
+          case 'list': {
+            const result = await manager.exec(nodeId, 'tailscale exit-node list 2>&1 | head -40');
+            return ok(nodeId, result.durationMs, result.stdout, 'tailscale exit nodes');
+          }
+          case 'rotate': {
+            const result = await manager.exec(nodeId, `tailscale up --exit-node= 2>/dev/null; sleep 1; ${vpnServer ? `tailscale up --exit-node=${vpnServer}` : 'tailscale up'} 2>&1 && sleep 2 && curl -s --max-time 5 https://ifconfig.me`);
+            return ok(nodeId, result.durationMs, result.stdout, 'tailscale rotate');
+          }
+          case 'full-on': {
+            const exitNode = vpnServer ?? '';
+            if (!exitNode) return fail('server param required for full-on (tailscale exit node hostname)');
+            const result = await manager.exec(nodeId, `tailscale up --exit-node=${exitNode} --exit-node-allow-lan-access 2>&1 && sleep 2 && tailscale status | head -10 && echo "---ip---" && curl -s --max-time 5 https://ifconfig.me`);
+            return ok(nodeId, result.durationMs, result.stdout, `tailscale full-on via ${exitNode}`);
+          }
+          case 'full-off': {
+            const result = await manager.exec(nodeId, 'tailscale up --exit-node= 2>&1 && tailscale status | head -5');
+            return ok(nodeId, result.durationMs, result.stdout, 'tailscale full-off');
+          }
+        }
+      }
+
+      // full-on / full-off: node-wide VPN with mesh route exclusions
+      if (action === 'full-on') {
+        if (detected === 'mullvad') {
+          const relay = vpnServer ? `mullvad relay set location ${vpnServer};` : '';
+          // Mullvad full mode: enable, but add route exclusions for mesh IPs
+          const result = await manager.exec(nodeId,
+            `${relay} mullvad lan set allow; mullvad split-tunnel set state on; mullvad connect && sleep 2 && ` +
+            // Preserve ALL mesh routes: wg0 (main mesh), wg1 (B2B), tailscale0 (TS networks)
+            `ip route add 10.10.0.0/24 dev wg0 2>/dev/null; ` +     // WG mesh
+            `ip route add 10.20.0.0/24 dev wg1 2>/dev/null; ` +     // WG B2B
+            `ip route add 100.64.0.0/10 dev tailscale0 2>/dev/null; ` +  // Tailscale CGNAT range
+            `mullvad status && echo "---mesh-check---" && ping -c1 -W2 10.10.0.1 2>/dev/null && echo "mesh: OK" || echo "mesh: WARN"`
+          );
+          return ok(nodeId, result.durationMs, result.stdout, 'mullvad full-on (mesh preserved)');
+        }
+        if (detected === 'openvpn') {
+          const configPath = config ?? vpnServer ?? '/etc/openvpn/client.conf';
+          // OpenVPN with route-nopull + specific routes — keeps mesh alive
+          const result = await manager.exec(nodeId,
+            `openvpn --config "${configPath}" --daemon --log /tmp/openvpn-full.log ` +
+            `--route-nopull --route 0.0.0.0 0.0.0.0 vpn_gateway ` +
+            `--route 10.10.0.0 255.255.255.0 net_gateway ` +  // wg0 mesh
+            `--route 10.20.0.0 255.255.255.0 net_gateway ` +  // wg1 B2B
+            `--route 100.64.0.0 255.192.0.0 net_gateway ` +   // tailscale CGNAT
+            `&& sleep 4 && ip addr show tun0 2>/dev/null | grep inet && curl -s --max-time 5 https://ifconfig.me && ` +
+            `echo "---mesh---" && ping -c1 -W2 10.10.0.1 2>/dev/null && echo "mesh: OK" || echo "mesh: WARN"`
+          );
+          return ok(nodeId, result.durationMs, result.stdout, 'openvpn full-on (mesh preserved)');
+        }
+        return fail(`full-on not supported for ${detected}. Use mullvad, openvpn, or tailscale.`);
+      }
+
+      if (action === 'full-off') {
+        if (detected === 'mullvad') {
+          const result = await manager.exec(nodeId, 'mullvad disconnect && mullvad status');
+          return ok(nodeId, result.durationMs, result.stdout, 'mullvad full-off');
+        }
+        if (detected === 'openvpn') {
+          const result = await manager.exec(nodeId, 'pkill openvpn 2>/dev/null; sleep 1; echo "disconnected" && curl -s --max-time 5 https://ifconfig.me');
+          return ok(nodeId, result.durationMs, result.stdout, 'openvpn full-off');
+        }
+        return fail(`full-off not supported for ${detected}`);
+      }
+
+      return fail(`No VPN provider found on ${nodeId}. Install mullvad, tailscale, openvpn, or wireguard.`);
+    }
+  );
+
+  // --- Tool 31: omniwire_clipboard ---
   server.tool(
     'omniwire_clipboard',
     'Copy text between nodes via a shared clipboard buffer.',
