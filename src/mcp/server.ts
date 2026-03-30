@@ -4728,6 +4728,106 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
     }
   );
 
+  // --- Tool: omniwire_scrape ---
+  // Scrapling-powered web scraping: static HTTP (TLS spoofing), browser (JS rendering), stealth (anti-bot bypass).
+  // Runs via Scrapling MCP server on Contabo (port 8931) or falls back to CLI.
+  server.tool(
+    'omniwire_scrape',
+    'Scrape web pages using Scrapling — adaptive, anti-bot web scraping. Modes: http (fast TLS-spoofed static fetch), browser (Playwright JS rendering), stealth (Camoufox + Cloudflare bypass). Returns markdown/html/text. Powered by Scrapling on Contabo.',
+    {
+      url: z.string().describe('Target URL to scrape'),
+      urls: z.array(z.string()).optional().describe('Multiple URLs for bulk scraping (uses session pooling)'),
+      mode: z.enum(['http', 'browser', 'stealth']).default('http').describe('http=fast static, browser=JS rendering, stealth=anti-bot+Cloudflare'),
+      extraction_type: z.enum(['markdown', 'html', 'text']).default('markdown').describe('Output format'),
+      css_selector: z.string().optional().describe('CSS selector to extract specific elements only'),
+      solve_cloudflare: z.boolean().optional().describe('Solve Cloudflare Turnstile (stealth mode only)'),
+      wait_selector: z.string().optional().describe('Wait for this CSS selector before extracting (browser/stealth)'),
+      network_idle: z.boolean().optional().describe('Wait for network idle before extracting'),
+      proxy: z.string().optional().describe('Proxy URL (http://user:pass@host:port)'),
+      timeout: z.number().default(30).describe('Timeout in seconds'),
+      impersonate: z.string().optional().describe('TLS fingerprint: chrome, safari, firefox (http mode)'),
+      node: z.string().optional().describe('Node to run on (default: contabo)'),
+      label: z.string().optional().describe('Short label for task tracking'),
+    },
+    async ({ url, urls, mode, extraction_type, css_selector, solve_cloudflare, wait_selector, network_idle, proxy, timeout, impersonate, node: targetNode, label }) => {
+      if (!manager) return fail('NodeManager not initialized');
+      const target = targetNode ?? 'contabo';
+
+      // Build the Scrapling Python command based on mode
+      const allUrls = urls?.length ? urls : [url];
+      const urlList = allUrls.map(u => `'${u.replace(/'/g, "'\\''")}'`).join(' ');
+
+      // Map mode to Scrapling fetcher
+      const fetcherMap: Record<string, string> = {
+        http: 'Fetcher',
+        browser: 'DynamicFetcher',
+        stealth: 'StealthyFetcher',
+      };
+      const fetcher = fetcherMap[mode] ?? 'Fetcher';
+
+      // Build Python script
+      const proxyArg = proxy ? `, proxy='${proxy.replace(/'/g, "'\\''")}'` : '';
+      const impersonateArg = impersonate ? `, impersonate='${impersonate}'` : '';
+      const timeoutArg = `, timeout=${timeout}`;
+      const cfArg = solve_cloudflare ? ', solve_cloudflare=True' : '';
+      const waitArg = wait_selector ? `, wait_selector='${wait_selector.replace(/'/g, "'\\''")}'` : '';
+      const idleArg = network_idle ? ', network_idle=True' : '';
+      const selectorArg = css_selector ? `.css('${css_selector.replace(/'/g, "'\\''")}')` : '';
+
+      // Extraction type mapping
+      const extractMap: Record<string, string> = {
+        markdown: '.get_all_text()',
+        html: '.prettify() if hasattr(page, "prettify") else str(page)',
+        text: '.get_all_text()',
+      };
+      const extract = selectorArg ? `.getall()` : extractMap[extraction_type] ?? '.get_all_text()';
+
+      const script = `
+import json, sys
+try:
+    from scrapling import ${fetcher}
+    results = []
+    urls = ${JSON.stringify(allUrls)}
+    for u in urls:
+        try:
+            page = ${fetcher}().get(u${proxyArg}${impersonateArg}${timeoutArg}${cfArg}${waitArg}${idleArg})
+            if page.status == 200:
+                content = page${selectorArg}${extract}
+                if isinstance(content, list):
+                    content = '\\n'.join(str(c) for c in content)
+                results.append({"url": u, "status": page.status, "content": str(content)[:50000]})
+            else:
+                results.append({"url": u, "status": page.status, "content": f"HTTP {page.status}"})
+        except Exception as e:
+            results.append({"url": u, "status": 0, "error": str(e)[:500]})
+    print(json.dumps(results))
+except Exception as e:
+    print(json.dumps([{"error": str(e)}]))
+`.trim();
+
+      try {
+        const r = await manager.exec(target, `python3 -c ${JSON.stringify(script)}`);
+        const output = r.stdout.trim();
+        try {
+          const results = JSON.parse(output);
+          if (results.length === 1) {
+            const res = results[0];
+            if (res.error) return fail(`scrape error: ${res.error}`);
+            return okBrief(`[${res.status}] ${res.url}\n\n${res.content}`);
+          }
+          const summary = results.map((r: { url?: string; status?: number; content?: string; error?: string }) =>
+            `[${r.status ?? 'ERR'}] ${r.url ?? '?'}: ${r.error ?? `${(r.content ?? '').length} chars`}`
+          ).join('\n');
+          return okBrief(`Scraped ${results.length} URLs:\n${summary}\n\n${results.map((r: { content?: string }) => r.content ?? '').join('\n---\n').slice(0, 50000)}`);
+        } catch {
+          return okBrief(output.slice(0, 10000));
+        }
+      } catch (e) {
+        return fail(`scrape failed on ${target}: ${(e as Error).message}`);
+      }
+    }
+  );
+
   // --- Tool 54: omniwire_omnimesh ---
   server.tool(
     'omniwire_omnimesh',
