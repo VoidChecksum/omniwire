@@ -13,6 +13,8 @@
   <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
   <img src="https://img.shields.io/badge/CyberBase-Sync-CC93E6?style=for-the-badge&labelColor=0D1117" alt="cyberbase" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/GPL--3.0-license-8B949E?style=for-the-badge&labelColor=0D1117" alt="license" /></a>
+  <a href="https://clawhub.ai/voidchecksum/omniwire"><img src="https://img.shields.io/badge/ClawhHub-Skill-F97316?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==&labelColor=0D1117" alt="ClawhHub" /></a>
+  <a href="https://docs.openclaw.ai/"><img src="https://img.shields.io/badge/OpenClaw-Compatible-FF4500?style=for-the-badge&logo=lobster&logoColor=white&labelColor=0D1117" alt="OpenClaw" /></a>
 </p>
 
 <div align="center">
