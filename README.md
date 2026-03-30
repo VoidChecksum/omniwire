@@ -259,6 +259,72 @@ graph TB
 
 ---
 
+## Agent Setup Instructions
+
+### OpenClaw
+
+OmniWire is available as a [ClawhHub skill](https://clawhub.ai/voidchecksum/omniwire):
+
+```bash
+# Install via ClawhHub CLI
+clawhub install omniwire
+
+# Or manual: copy integrations/openclaw/SKILL.md to your OpenClaw skills directory
+cp integrations/openclaw/SKILL.md ~/.openclaw/skills/omniwire.md
+```
+
+CyberSync automatically ingests OpenClaw agents, skills, memory, and workspace into CyberBase PostgreSQL.
+
+### PaperClip
+
+Register OmniWire as a zero-cost infrastructure agent:
+
+```json
+{
+  "agents": [{
+    "name": "omniwire",
+    "type": "local-cli",
+    "command": "omniwire --stdio",
+    "skills": ["mesh-exec", "file-transfer", "service-control", "docker", "vpn", "scraping", "firewall"],
+    "budget": { "monthly_usd": 0 }
+  }]
+}
+```
+
+See `integrations/paperclip/` for the full adapter and skill definition.
+
+### Claude Code
+
+```json
+{
+  "mcpServers": {
+    "omniwire": {
+      "command": "omniwire",
+      "args": ["--stdio"]
+    }
+  }
+}
+```
+
+### OpenCode / Oh-My-OpenAgent
+
+```json
+{
+  "mcp": {
+    "omniwire": {
+      "type": "local",
+      "command": ["omniwire", "--stdio"]
+    }
+  }
+}
+```
+
+### Codex / Gemini
+
+CyberSync automatically syncs OmniWire config to Codex and Gemini environments.
+
+---
+
 ## Key Capabilities
 
 <table>
@@ -590,6 +656,139 @@ Create `~/.omniwire/mesh.json`:
 
 ---
 
+## Agentic Installation / Setup
+
+> For adding a new node to your OmniWire mesh — what to have ready, how to wire it in, and how to connect it to Claude Code.
+
+### Prerequisites
+
+| Requirement | Notes |
+|-------------|-------|
+| **Node.js >= 20** | `node -v` to verify |
+| **npm >= 9** | Comes with Node.js 20+ |
+| **WireGuard** | `wg` CLI + kernel module (Linux: `apt install wireguard`, macOS: Homebrew, Windows: GUI installer) |
+| **SSH key pair** | Ed25519 recommended — `ssh-keygen -t ed25519 -f ~/.ssh/id_omniwire` |
+| **SSH access to nodes** | Key deployed to `~/.ssh/authorized_keys` on every remote node |
+| **1Password CLI** | `op` v2+, signed in — required for `omniwire_secrets` and cookie sync to vault |
+| **PostgreSQL (optional)** | Required only for CyberSync / CyberBase persistence — Contabo hosts it at `10.10.0.1:5432` |
+
+### Install OmniWire
+
+```bash
+npm install -g omniwire
+omniwire --version   # verify
+```
+
+### Add a New Node
+
+**1. Generate WireGuard keypair on the new node:**
+```bash
+wg genkey | tee /etc/wireguard/node_private.key | wg pubkey > /etc/wireguard/node_pub.key
+cat /etc/wireguard/node_pub.key
+```
+
+**2. Assign it a mesh IP** (next available in `10.10.0.0/24`):
+
+| Node | Mesh IP | Role |
+|------|---------|------|
+| Contabo (hub) | `10.10.0.1` | storage, CyberBase |
+| Hostinger | `10.10.0.2` | compute |
+| Windows PC | `10.10.0.3` | local dev |
+| ThinkPad | `10.10.0.4` | local dev |
+| _new node_ | `10.10.0.N` | assign next |
+
+**3. Register the node with OmniMesh** (run from any node already in the mesh):
+```bash
+omniwire_omnimesh(action="add-peer",
+  id="newnode",
+  public_key="<pubkey from step 1>",
+  allowed_ips="10.10.0.N/32",
+  endpoint="<public IP or DNS>:51820"
+)
+```
+
+**4. Push updated peer list to all nodes:**
+```bash
+omniwire_omnimesh(action="sync-peers")
+```
+
+**5. Bring the interface up on the new node:**
+```bash
+wg-quick up wg0
+ping 10.10.0.1   # verify hub reachability
+```
+
+### Configure OmniWire on the New Node
+
+Add the node to `~/.omniwire/mesh.json` (create if absent):
+
+```json
+{
+  "nodes": [
+    { "id": "contabo",   "host": "10.10.0.1", "user": "root", "identityFile": "~/.ssh/id_omniwire", "role": "storage" },
+    { "id": "hostinger", "host": "10.10.0.2", "user": "root", "identityFile": "~/.ssh/id_omniwire", "role": "compute" },
+    { "id": "windows",   "host": "10.10.0.3", "user": "Admin", "identityFile": "~/.ssh/id_omniwire", "role": "local" },
+    { "id": "thinkpad",  "host": "10.10.0.4", "user": "user",  "identityFile": "~/.ssh/id_omniwire", "role": "local" }
+  ]
+}
+```
+
+Verify connectivity:
+```bash
+omniwire_mesh_status    # should show all nodes green
+omniwire_doctor         # checks SSH, disk, mem, WireGuard, CyberBase
+```
+
+### Connect Claude Code via MCP
+
+Add to `~/.claude/claude_desktop_config.json` (or your IDE's MCP config):
+
+```json
+{
+  "mcpServers": {
+    "omniwire": { "command": "omniwire", "args": ["--stdio"] }
+  }
+}
+```
+
+Restart Claude Code. Verify in a new session:
+```
+omniwire_mesh_status()   # 88 tools should be available
+```
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OP_SERVICE_ACCOUNT_TOKEN` | For 1Password sync | Service account token from 1Password |
+| `OMNIWIRE_VAULT_ROOT` | Optional | Path to Obsidian vault root (default: CyberBase vault) |
+| `CYBERSYNC_DB_URL` | Optional | PostgreSQL DSN — defaults to `postgresql://cyberbase@10.10.0.1:5432/cyberbase` |
+| `OMNIWIRE_MESH_CONFIG` | Optional | Override mesh.json path |
+
+Set persistently on a node:
+```bash
+omniwire_env(action="set", key="OP_SERVICE_ACCOUNT_TOKEN", value="<token>", node="contabo", persist=true)
+```
+
+### CyberSync Auto-Distribution
+
+CyberSync pushes configs, secrets, and memories to all nodes automatically via PostgreSQL.
+
+```bash
+# Check what's tracked
+omniwire_coc(action="cybersync-status")
+
+# Force push current config to all nodes
+omniwire_coc(action="force-sync")
+
+# Diff local state vs database
+cybersync_diff()
+```
+
+On first run, CyberSync pulls node configs, 2FA seeds, and Claude memories from CyberBase — no manual copy-paste between machines.
+
+---
+
 ## Changelog
 
 <details>
@@ -687,6 +886,7 @@ omniwire/
 
 | Version | Date | Changes |
 |---------|------|---------|
+| **v3.5.0** | 2026-03-30 | Full OpenClaw + PaperClip integration. ClawhHub skill updated (v2.1.0→v3.5.0, 30→88 tools). Agent setup instructions for OpenClaw, PaperClip, Oh-My-OpenAgent. Updated all integration manifests. New: `integrations/paperclip/SKILL.md`, `integrations/paperclip/README.md`. |
 | **v3.4.1** | 2026-03-30 | Cross-OS: `omniwire_scrape` install works on Linux (systemd), macOS (launchd), Windows, Docker (nohup). Auto-upgrades deps + browsers. Python/pip path detection. |
 | **v3.4.0** | 2026-03-30 | Rewrite: `omniwire_scrape` — OmniMesh-routed Scrapling with auto-install, VPN routing, adaptive selectors, XPath, bulk sessions. install/status actions. Full README audit (88 tools). |
 | **v3.3.1** | 2026-03-30 | New: `omniwire_scrape` tool — Scrapling-powered web scraping (static/browser/stealth modes, Cloudflare bypass, TLS spoofing). |
