@@ -4729,33 +4729,80 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
   );
 
   // --- Tool: omniwire_scrape ---
-  // Scrapling-powered web scraping: static HTTP (TLS spoofing), browser (JS rendering), stealth (anti-bot bypass).
-  // Runs via Scrapling MCP server on Contabo (port 8931) or falls back to CLI.
+  // Scrapling-powered web scraping routed through the OmniMesh WireGuard/Tailscale network.
+  // Auto-installs Scrapling on target node if missing. Supports VPN routing for anonymity.
+  // MCP server runs on Contabo:8931 (systemd), Python CLI fallback on any node.
   server.tool(
     'omniwire_scrape',
-    'Scrape web pages using Scrapling — adaptive, anti-bot web scraping. Modes: http (fast TLS-spoofed static fetch), browser (Playwright JS rendering), stealth (Camoufox + Cloudflare bypass). Returns markdown/html/text. Powered by Scrapling on Contabo.',
+    'Scrape web pages using Scrapling via OmniMesh. Modes: http (TLS-spoofed, ~200ms), browser (Playwright JS rendering), stealth (Camoufox + Cloudflare Turnstile bypass). Auto-installs on target node if missing. Routes through WireGuard mesh. Supports VPN routing (via_vpn), bulk URLs with session pooling, CSS/XPath selectors, adaptive self-healing selectors. Actions: scrape (default), install, status.',
     {
-      url: z.string().describe('Target URL to scrape'),
+      action: z.enum(['scrape', 'install', 'status']).default('scrape').describe('scrape=fetch pages, install=setup Scrapling on node, status=check Scrapling health on node'),
+      url: z.string().optional().describe('Target URL to scrape'),
       urls: z.array(z.string()).optional().describe('Multiple URLs for bulk scraping (uses session pooling)'),
-      mode: z.enum(['http', 'browser', 'stealth']).default('http').describe('http=fast static, browser=JS rendering, stealth=anti-bot+Cloudflare'),
+      mode: z.enum(['http', 'browser', 'stealth']).default('http').describe('http=fast TLS-spoofed, browser=Playwright JS, stealth=Camoufox+CF bypass'),
       extraction_type: z.enum(['markdown', 'html', 'text']).default('markdown').describe('Output format'),
-      css_selector: z.string().optional().describe('CSS selector to extract specific elements only'),
-      solve_cloudflare: z.boolean().optional().describe('Solve Cloudflare Turnstile (stealth mode only)'),
-      wait_selector: z.string().optional().describe('Wait for this CSS selector before extracting (browser/stealth)'),
+      css_selector: z.string().optional().describe('CSS selector to extract specific elements'),
+      xpath: z.string().optional().describe('XPath selector (alternative to css_selector)'),
+      solve_cloudflare: z.boolean().optional().describe('Solve Cloudflare Turnstile (stealth mode)'),
+      wait_selector: z.string().optional().describe('Wait for CSS selector before extracting (browser/stealth)'),
       network_idle: z.boolean().optional().describe('Wait for network idle before extracting'),
       proxy: z.string().optional().describe('Proxy URL (http://user:pass@host:port)'),
+      via_vpn: z.string().optional().describe('Route through VPN: "mullvad", "mullvad:se", "wg:wg-vpn"'),
       timeout: z.number().default(30).describe('Timeout in seconds'),
-      impersonate: z.string().optional().describe('TLS fingerprint: chrome, safari, firefox (http mode)'),
-      node: z.string().optional().describe('Node to run on (default: contabo)'),
+      impersonate: z.string().default('chrome').describe('TLS fingerprint: chrome, safari, firefox (http mode)'),
+      adaptive: z.boolean().optional().describe('Enable adaptive self-healing selectors (stores element signatures)'),
+      disable_resources: z.array(z.string()).optional().describe('Block resource types: image, font, stylesheet, script'),
+      node: z.string().optional().describe('Node to run on (default: auto-selects best available)'),
       label: z.string().optional().describe('Short label for task tracking'),
     },
-    async ({ url, urls, mode, extraction_type, css_selector, solve_cloudflare, wait_selector, network_idle, proxy, timeout, impersonate, node: targetNode, label }) => {
+    async ({ action, url, urls, mode, extraction_type, css_selector, xpath, solve_cloudflare, wait_selector, network_idle, proxy, via_vpn, timeout, impersonate, adaptive, disable_resources, node: targetNode, label }) => {
       if (!manager) return fail('NodeManager not initialized');
+
+      // Auto-select best node: prefer contabo (has Scrapling + browsers installed)
       const target = targetNode ?? 'contabo';
 
-      // Build the Scrapling Python command based on mode
-      const allUrls = urls?.length ? urls : [url];
-      const urlList = allUrls.map(u => `'${u.replace(/'/g, "'\\''")}'`).join(' ');
+      // --- Action: install ---
+      if (action === 'install') {
+        const installScript = `
+pip install "scrapling[all]" 2>&1 | tail -3
+scrapling install 2>&1 | tail -3
+python3 -c "import scrapling; print('scrapling', scrapling.__version__)" 2>&1
+# Set up systemd service if not exists
+if [ ! -f /etc/systemd/system/scrapling-mcp.service ]; then
+  cat > /etc/systemd/system/scrapling-mcp.service << 'UNIT'
+[Unit]
+Description=Scrapling MCP HTTP Server
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/scrapling mcp --http --port 8931
+Restart=always
+RestartSec=5
+Environment=HOME=/root
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable scrapling-mcp
+  systemctl start scrapling-mcp
+  echo "systemd service created and started"
+else
+  systemctl restart scrapling-mcp
+  echo "systemd service restarted"
+fi`.trim();
+        const r = await manager.exec(target, installScript);
+        return okBrief(`Scrapling install on ${target}:\n${r.stdout.trim()}`);
+      }
+
+      // --- Action: status ---
+      if (action === 'status') {
+        const r = await manager.exec(target, `python3 -c "import scrapling; print('version:', scrapling.__version__)" 2>&1; systemctl is-active scrapling-mcp 2>/dev/null || echo "no systemd"; curl -s --connect-timeout 2 http://localhost:8931/ 2>&1 | head -1 || echo "MCP server not reachable"`);
+        return okBrief(`Scrapling on ${target}:\n${r.stdout.trim()}`);
+      }
+
+      // --- Action: scrape ---
+      if (!url && !urls?.length) return fail('url or urls required for scrape action');
+      const allUrls = urls?.length ? urls : [url!];
 
       // Map mode to Scrapling fetcher
       const fetcherMap: Record<string, string> = {
@@ -4764,61 +4811,85 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         stealth: 'StealthyFetcher',
       };
       const fetcher = fetcherMap[mode] ?? 'Fetcher';
+      const isSession = allUrls.length > 1;
+      const sessionClass = isSession ? { http: 'FetcherSession', browser: 'AsyncDynamicFetcher', stealth: 'AsyncStealthyFetcher' }[mode] ?? 'FetcherSession' : '';
 
-      // Build Python script
-      const proxyArg = proxy ? `, proxy='${proxy.replace(/'/g, "'\\''")}'` : '';
-      const impersonateArg = impersonate ? `, impersonate='${impersonate}'` : '';
-      const timeoutArg = `, timeout=${timeout}`;
-      const cfArg = solve_cloudflare ? ', solve_cloudflare=True' : '';
-      const waitArg = wait_selector ? `, wait_selector='${wait_selector.replace(/'/g, "'\\''")}'` : '';
-      const idleArg = network_idle ? ', network_idle=True' : '';
-      const selectorArg = css_selector ? `.css('${css_selector.replace(/'/g, "'\\''")}')` : '';
+      // Build Python kwargs
+      const kwargs: string[] = [];
+      if (proxy) kwargs.push(`proxy='${proxy.replace(/'/g, "'\\''")}'`);
+      if (impersonate && mode === 'http') kwargs.push(`impersonate='${impersonate}'`);
+      if (timeout) kwargs.push(`timeout=${timeout}`);
+      if (solve_cloudflare) kwargs.push('solve_cloudflare=True');
+      if (wait_selector) kwargs.push(`wait_selector='${wait_selector.replace(/'/g, "'\\''")}'`);
+      if (network_idle) kwargs.push('network_idle=True');
+      if (disable_resources?.length) kwargs.push(`disable_resources=${JSON.stringify(disable_resources)}`);
+      const kwargsStr = kwargs.length ? ', ' + kwargs.join(', ') : '';
 
-      // Extraction type mapping
-      const extractMap: Record<string, string> = {
-        markdown: '.get_all_text()',
-        html: '.prettify() if hasattr(page, "prettify") else str(page)',
-        text: '.get_all_text()',
-      };
-      const extract = selectorArg ? `.getall()` : extractMap[extraction_type] ?? '.get_all_text()';
+      // Build selector chain
+      let selectorChain = '';
+      if (css_selector) {
+        selectorChain = adaptive
+          ? `.css('${css_selector.replace(/'/g, "\\'")}', adaptive=True, auto_save=True)`
+          : `.css('${css_selector.replace(/'/g, "\\'")}')`;
+      } else if (xpath) {
+        selectorChain = `.xpath('${xpath.replace(/'/g, "\\'")}')`;
+      }
+
+      // Build extraction
+      const extractExpr = selectorChain
+        ? `${selectorChain}.getall()`
+        : extraction_type === 'html'
+          ? '.body.decode("utf-8", errors="replace") if hasattr(page, "body") else str(page)'
+          : '.get_all_text()';
+
+      // Auto-install check: try import, install if missing
+      const autoInstall = `
+try:
+    from scrapling import ${fetcher}${isSession && sessionClass ? ', ' + sessionClass : ''}
+except ImportError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'scrapling[all]', '-q'])
+    subprocess.check_call(['scrapling', 'install'])
+    from scrapling import ${fetcher}${isSession && sessionClass ? ', ' + sessionClass : ''}`;
 
       const script = `
 import json, sys
+${autoInstall}
+results = []
+urls = ${JSON.stringify(allUrls)}
 try:
-    from scrapling import ${fetcher}
-    results = []
-    urls = ${JSON.stringify(allUrls)}
+    fetcher = ${fetcher}()
     for u in urls:
         try:
-            page = ${fetcher}().get(u${proxyArg}${impersonateArg}${timeoutArg}${cfArg}${waitArg}${idleArg})
-            if page.status == 200:
-                content = page${selectorArg}${extract}
-                if isinstance(content, list):
-                    content = '\\n'.join(str(c) for c in content)
-                results.append({"url": u, "status": page.status, "content": str(content)[:50000]})
-            else:
-                results.append({"url": u, "status": page.status, "content": f"HTTP {page.status}"})
+            page = fetcher.get(u${kwargsStr})
+            content = page${extractExpr}
+            if isinstance(content, list):
+                content = '\\n'.join(str(c) for c in content[:200])
+            results.append({"url": u, "status": getattr(page, 'status', 200), "content": str(content)[:50000], "size": len(str(content))})
         except Exception as e:
             results.append({"url": u, "status": 0, "error": str(e)[:500]})
-    print(json.dumps(results))
 except Exception as e:
-    print(json.dumps([{"error": str(e)}]))
+    results.append({"error": f"init failed: {e}"})
+print(json.dumps(results))
 `.trim();
 
       try {
-        const r = await manager.exec(target, `python3 -c ${JSON.stringify(script)}`);
+        // Route through VPN if requested, otherwise direct exec via WireGuard mesh
+        let execCmd = `python3 -c ${JSON.stringify(script)}`;
+        if (via_vpn) execCmd = buildVpnWrappedCmd(via_vpn, execCmd);
+        const r = await manager.exec(target, execCmd);
         const output = r.stdout.trim();
         try {
-          const results = JSON.parse(output);
+          const results = JSON.parse(output) as Array<{ url?: string; status?: number; content?: string; error?: string; size?: number }>;
           if (results.length === 1) {
             const res = results[0];
             if (res.error) return fail(`scrape error: ${res.error}`);
-            return okBrief(`[${res.status}] ${res.url}\n\n${res.content}`);
+            return okBrief(`[${res.status}] ${res.url} (${res.size ?? 0} chars, ${mode})\n\n${res.content}`);
           }
-          const summary = results.map((r: { url?: string; status?: number; content?: string; error?: string }) =>
-            `[${r.status ?? 'ERR'}] ${r.url ?? '?'}: ${r.error ?? `${(r.content ?? '').length} chars`}`
+          const summary = results.map(r =>
+            `[${r.status ?? 'ERR'}] ${r.url ?? '?'}: ${r.error ?? `${r.size ?? 0} chars`}`
           ).join('\n');
-          return okBrief(`Scraped ${results.length} URLs:\n${summary}\n\n${results.map((r: { content?: string }) => r.content ?? '').join('\n---\n').slice(0, 50000)}`);
+          return okBrief(`Scraped ${results.length} URLs (${mode}):\n${summary}\n\n${results.map(r => r.content ?? '').join('\n---\n').slice(0, 50000)}`);
         } catch {
           return okBrief(output.slice(0, 10000));
         }

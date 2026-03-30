@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omniwire"><img src="https://img.shields.io/npm/v/omniwire?style=for-the-badge&logo=npm&color=CB3837&labelColor=0D1117" alt="npm" /></a>
-  <img src="https://img.shields.io/badge/MCP_Tools-86-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
+  <img src="https://img.shields.io/badge/MCP_Tools-88-59C2FF?style=for-the-badge&labelColor=0D1117" alt="tools" />
   <img src="https://img.shields.io/badge/A2A-Protocol-00C853?style=for-the-badge&labelColor=0D1117" alt="A2A" />
   <img src="https://img.shields.io/badge/Latency-~80ms-FF6D00?style=for-the-badge&labelColor=0D1117" alt="latency" />
   <img src="https://img.shields.io/badge/CyberBase-Sync-CC93E6?style=for-the-badge&labelColor=0D1117" alt="cyberbase" />
@@ -214,7 +214,7 @@ graph TB
         direction TB
         MCP["MCP Protocol Layer<br/>stdio | SSE | REST"]
 
-        subgraph tools["86 Tools"]
+        subgraph tools["88 Tools"]
             direction LR
             EXEC["Execution<br/>exec  run  batch<br/>broadcast  pipeline  bg"]
             AGENT["Agentic<br/>store  watch  task<br/>a2a  events  locks"]
@@ -348,7 +348,7 @@ watch(assert="ready")       poll until
 
 ---
 
-## All 81 Tools
+## All 88 Tools
 
 > **Every tool** supports `background: true` — returns a task ID immediately. Poll with `omniwire_bg`.
 
@@ -632,7 +632,7 @@ Create `~/.omniwire/mesh.json`:
 <details>
 <summary><b>v2.5.1 -- Universal Background Dispatch</b></summary>
 
-**`background: true`** auto-injected into all 86 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
+**`background: true`** auto-injected into all 88 tools via server-level wrapper. Returns task ID, poll with `omniwire_bg`. New `omniwire_bg` tool for list/poll/result.
 
 </details>
 
@@ -671,7 +671,7 @@ Security fixes, multi-path SSH failover, CyberBase integration, VaultBridge Obsi
 ```
 omniwire/
   src/
-    mcp/           MCP server (86 tools, 3 transports)
+    mcp/           MCP server (88 tools, 3 transports)
     nodes/         SSH2 pool, transfer engine, PTY, tunnels
     sync/          CyberSync + CyberBase (PostgreSQL, Obsidian, encryption)
     protocol/      Mesh config, types, path parsing
@@ -687,7 +687,8 @@ omniwire/
 
 | Version | Date | Changes |
 |---------|------|---------|
-| **v3.3.1** | 2026-03-30 | New: `omniwire_scrape` tool — Scrapling-powered web scraping (static/browser/stealth modes, Cloudflare bypass, TLS spoofing). 88 tools. |
+| **v3.4.0** | 2026-03-30 | Rewrite: `omniwire_scrape` — OmniMesh-routed Scrapling with auto-install, VPN routing, adaptive selectors, XPath, bulk sessions. install/status actions. Full README audit (88 tools everywhere). |
+| **v3.3.1** | 2026-03-30 | New: `omniwire_scrape` tool — Scrapling-powered web scraping (static/browser/stealth modes, Cloudflare bypass, TLS spoofing). |
 | **v3.3.0** | 2026-03-30 | New: `omniwire_coc` tool — unified CyberBase + Obsidian + Canvas sync. Auto-creates vault + canvas. `mirror-db` exports entire DB as .md. Configurable vault via `OMNIWIRE_VAULT_ROOT` env. |
 | **v3.2.2** | 2026-03-30 | Fix: sync GitHub/npm metadata — badge, description, mermaid diagram all reflect 86 tools |
 | **v3.2.1** | 2026-03-30 | New: 5 bi-directional sync tools (`omniwire_sync`, `omniwire_sync_rules`, `omniwire_sync_hooks`, `omniwire_sync_memory`, `omniwire_sync_agents`) — 86 tools total |
