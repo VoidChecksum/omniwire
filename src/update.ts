@@ -320,3 +320,33 @@ export function getSystemInfo(): Record<string, string> {
     pid: String(process.pid),
   };
 }
+
+/** Mesh-wide update: after local update succeeds, push to all known nodes via SSH */
+export async function meshUpdate(
+  execOnNode: (node: string, cmd: string) => Promise<{ stdout: string; code: number }>,
+  nodes: string[],
+): Promise<Array<{ node: string; ok: boolean; message: string }>> {
+  const version = getCurrentVersion();
+  const results: Array<{ node: string; ok: boolean; message: string }> = [];
+
+  const updateCmd = `npm install -g ${NPM_PACKAGE}@${version} 2>&1 && echo "OK:$(omniwire --version 2>/dev/null || node -e \\"console.log(require('omniwire/package.json').version)\\" 2>/dev/null || echo ${version})" || echo "FAIL"`;
+
+  // Run in parallel
+  const promises = nodes.map(async (node) => {
+    try {
+      const r = await execOnNode(node, updateCmd);
+      const ok = r.stdout.includes('OK:');
+      const ver = ok ? r.stdout.match(/OK:(.+)/)?.[1]?.trim() ?? version : '';
+      return { node, ok, message: ok ? `updated to ${ver}` : r.stdout.slice(0, 200) };
+    } catch (e) {
+      return { node, ok: false, message: (e as Error).message.slice(0, 200) };
+    }
+  });
+
+  const settled = await Promise.allSettled(promises);
+  for (const s of settled) {
+    if (s.status === 'fulfilled') results.push(s.value);
+    else results.push({ node: 'unknown', ok: false, message: s.reason?.message ?? 'failed' });
+  }
+  return results;
+}

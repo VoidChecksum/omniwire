@@ -54,23 +54,25 @@
 
   <!-- Stats bar -->
   <g font-family="'Segoe UI Mono', 'SF Mono', monospace" font-size="12" fill="#1A3A5C" opacity="0.6">
-    <text x="112" y="175" text-anchor="middle">81 MCP Tools</text>
-    <text x="250" y="175" text-anchor="middle">A2A Protocol</text>
-    <text x="375" y="175" text-anchor="middle">OmniMesh</text>
-    <text x="490" y="175" text-anchor="middle">nftables FW</text>
-    <text x="612" y="175" text-anchor="middle">CyberBase</text>
-    <text x="728" y="175" text-anchor="middle">~80ms</text>
-    <text x="815" y="175" text-anchor="middle">v3.1</text>
+    <text x="100" y="175" text-anchor="middle">88 MCP Tools</text>
+    <text x="225" y="175" text-anchor="middle">A2A Protocol</text>
+    <text x="338" y="175" text-anchor="middle">OmniMesh</text>
+    <text x="440" y="175" text-anchor="middle">COC Sync</text>
+    <text x="545" y="175" text-anchor="middle">Scrapling</text>
+    <text x="650" y="175" text-anchor="middle">CyberBase</text>
+    <text x="750" y="175" text-anchor="middle">~80ms</text>
+    <text x="830" y="175" text-anchor="middle">v3.3</text>
   </g>
 
   <!-- Separator dots between stats -->
   <g fill="#1A3A5C" opacity="0.25">
-    <circle cx="182" cy="172" r="1.5"/>
-    <circle cx="313" cy="172" r="1.5"/>
-    <circle cx="432" cy="172" r="1.5"/>
-    <circle cx="550" cy="172" r="1.5"/>
-    <circle cx="670" cy="172" r="1.5"/>
-    <circle cx="770" cy="172" r="1.5"/>
+    <circle cx="163" cy="172" r="1.5"/>
+    <circle cx="282" cy="172" r="1.5"/>
+    <circle cx="389" cy="172" r="1.5"/>
+    <circle cx="493" cy="172" r="1.5"/>
+    <circle cx="598" cy="172" r="1.5"/>
+    <circle cx="700" cy="172" r="1.5"/>
+    <circle cx="790" cy="172" r="1.5"/>
   </g>
 
   <!-- Bottom wave -->
