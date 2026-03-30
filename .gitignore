@@ -25,3 +25,5 @@ cookies/
 *.sqlite
 *.disabled
 .omniwire-state/
+.omc/
+watchdog.ps1

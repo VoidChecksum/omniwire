@@ -1,7 +1,7 @@
 {
   "name": "omniwire",
-  "version": "3.2.2",
-  "description": "Infrastructure layer for AI agent swarms — 86 MCP tools · A2A · OmniMesh VPN · nftables firewall · CDP browser · CyberBase sync · bi-directional sync · 2FA TOTP · ~80ms",
+  "version": "3.3.0",
+  "description": "Infrastructure layer for AI agent swarms — 87 MCP tools · A2A · OmniMesh VPN · nftables firewall · CDP browser · COC (CyberBase+Obsidian+Canvas) · 2FA TOTP · ~80ms",
   "license": "GPL-3.0-only",
   "type": "module",
   "bin": {

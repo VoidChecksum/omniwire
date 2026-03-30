@@ -7,7 +7,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { NodeManager } from '../nodes/manager.js';
 import type { TransferEngine } from '../nodes/transfer.js';
@@ -288,14 +288,41 @@ async function drainCb() {
 
 // -- Obsidian + Canvas auto-sync ------------------------------------------------
 // Mirrors CyberBase writes to local Obsidian vault + Canvas mindmap.
-// Vault path is resolved at startup; if it doesn't exist, sync is silently skipped.
+// Vault path resolved from env or default; if it doesn't exist, sync is silently skipped.
+// Set OMNIWIRE_VAULT_ROOT to override, or OMNIWIRE_CANVAS_NAME for custom canvas filename.
 
-const VAULT_ROOT = join(
+const VAULT_ROOT = process.env.OMNIWIRE_VAULT_ROOT ?? join(
   process.env.USERPROFILE ?? process.env.HOME ?? '',
-  'Documents', 'BuisnessProjects', 'CyberBase'
+  'Documents', 'OmniWire'
 );
-const CANVAS_PATH = join(VAULT_ROOT, 'CyberBase MindMap.canvas');
+const CANVAS_NAME = process.env.OMNIWIRE_CANVAS_NAME ?? 'OmniWire MindMap.canvas';
+const CANVAS_PATH = join(VAULT_ROOT, CANVAS_NAME);
 const vaultExists = existsSync(VAULT_ROOT);
+
+/** Ensure the Obsidian vault root and canvas file exist, creating them if needed */
+function ensureVault(): boolean {
+  try {
+    if (!existsSync(VAULT_ROOT)) mkdirSync(VAULT_ROOT, { recursive: true });
+    if (!existsSync(CANVAS_PATH)) {
+      // Create a default canvas with a central hub node
+      const defaultCanvas = {
+        nodes: [{
+          id: 'core',
+          type: 'text' as const,
+          text: '## OmniWire\nCentral knowledge hub',
+          x: 0,
+          y: 0,
+          width: 300,
+          height: 120,
+          color: '4',
+        }],
+        edges: [] as Array<{ id: string; fromNode: string; fromSide: string; toNode: string; toSide: string; label?: string }>,
+      };
+      writeFileSync(CANVAS_PATH, JSON.stringify(defaultCanvas, null, '\t'), 'utf-8');
+    }
+    return true;
+  } catch { return false; }
+}
 
 /** Map CyberBase category → Obsidian vault subfolder */
 function vaultFolder(category: string): string {
@@ -318,7 +345,7 @@ function sanitizeFilename(key: string): string {
 
 /** Auto-sync a knowledge entry to Obsidian vault as a .md file */
 function syncObsidian(category: string, key: string, value: string): void {
-  if (!vaultExists) return;
+  if (!existsSync(VAULT_ROOT)) ensureVault();
   try {
     const folder = join(VAULT_ROOT, vaultFolder(category));
     if (!existsSync(folder)) mkdirSync(folder, { recursive: true });
@@ -399,7 +426,8 @@ function canvasColor(category: string): string {
 
 /** Auto-sync a knowledge entry to the Canvas mindmap — adds or updates a node */
 function syncCanvas(category: string, key: string, value: string): void {
-  if (!vaultExists || !existsSync(CANVAS_PATH)) return;
+  if (!existsSync(CANVAS_PATH)) ensureVault();
+  if (!existsSync(CANVAS_PATH)) return;
   try {
     const raw = readFileSync(CANVAS_PATH, 'utf-8');
     const canvas = JSON.parse(raw) as {
@@ -4584,7 +4612,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
 
       if (action === 'sync-obsidian') {
         if (!key || !value) return fail('key and value required');
-        if (!vaultExists) return fail(`Obsidian vault not found at ${VAULT_ROOT}`);
+        ensureVault();
         const cat = category ?? 'general';
         syncObsidian(cat, key, value);
         const folder = vaultFolder(cat);
@@ -4593,10 +4621,107 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
 
       if (action === 'sync-canvas') {
         if (!key || !value) return fail('key and value required');
-        if (!vaultExists || !existsSync(CANVAS_PATH)) return fail(`Canvas not found at ${CANVAS_PATH}`);
+        ensureVault();
         const cat = category ?? 'general';
         syncCanvas(cat, key, value);
         return okBrief(`synced to Canvas: node auto_${sanitizeFilename(cat)}_${sanitizeFilename(key)} added/updated`);
+      }
+
+      return fail('invalid action');
+    }
+  );
+
+  // --- Tool: omniwire_coc ---
+  // COC = CyberBase + Obsidian + Canvas — the default sync mode.
+  // Single tool call writes to all three destinations simultaneously.
+  // Also supports 'mirror-db' to export the entire DB as Obsidian .md files.
+  server.tool(
+    'omniwire_coc',
+    'COC (CyberBase + Obsidian + Canvas) — unified sync. Default: writes to PostgreSQL, Obsidian vault (.md), and Canvas mindmap in one call. Use "mirror-db" to export the entire knowledge DB as Obsidian-formatted markdown files. Use "init" to set up the vault + canvas from scratch.',
+    {
+      action: z.enum(['save', 'mirror-db', 'init', 'status']).describe('save: write to all 3 destinations. mirror-db: export entire DB as .md files. init: create vault + canvas. status: show sync state.'),
+      category: z.string().optional().describe('Knowledge category (e.g., tools, vulns, infra, notes)'),
+      key: z.string().optional().describe('Entry key'),
+      value: z.string().optional().describe('Entry value'),
+      entries: z.array(z.object({ category: z.string(), key: z.string(), value: z.string() })).optional().describe('Bulk save: array of {category, key, value}'),
+    },
+    async ({ action, category, key, value, entries }) => {
+      if (action === 'init') {
+        const created = ensureVault();
+        if (!created) return fail('Failed to create vault directory');
+        // Create standard subdirectories
+        const dirs = ['projects', 'infrastructure', 'knowledge', 'knowledge/security-kb', 'system', 'logs', 'sync', 'memory'];
+        for (const dir of dirs) {
+          const p = join(VAULT_ROOT, dir);
+          if (!existsSync(p)) mkdirSync(p, { recursive: true });
+        }
+        return okBrief(`COC vault initialized at ${VAULT_ROOT}\n  Canvas: ${CANVAS_NAME}\n  Directories: ${dirs.join(', ')}`);
+      }
+
+      if (action === 'status') {
+        const vaultOk = existsSync(VAULT_ROOT);
+        const canvasOk = existsSync(CANVAS_PATH);
+        const h = getCbHealth();
+        let canvasNodes = 0;
+        if (canvasOk) {
+          try {
+            const raw = JSON.parse(readFileSync(CANVAS_PATH, 'utf-8'));
+            canvasNodes = raw.nodes?.length ?? 0;
+          } catch { /* ignore */ }
+        }
+        // Count .md files in vault
+        let mdCount = 0;
+        const countMd = (dir: string) => {
+          try {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              if (entry.isDirectory()) countMd(join(dir, entry.name));
+              else if (entry.name.endsWith('.md')) mdCount++;
+            }
+          } catch { /* ignore */ }
+        };
+        if (vaultOk) countMd(VAULT_ROOT);
+        return okBrief(`COC Status:\n  Vault: ${vaultOk ? 'OK' : 'MISSING'} (${VAULT_ROOT})\n  Canvas: ${canvasOk ? `OK (${canvasNodes} nodes)` : 'MISSING'}\n  CyberBase: ${h.healthy ? 'OK' : 'UNHEALTHY'} (queue: ${h.queueSize})\n  Obsidian files: ${mdCount} .md files`);
+      }
+
+      if (action === 'save') {
+        // Bulk save
+        if (entries?.length) {
+          for (const e of entries) {
+            cb(e.category, e.key, e.value);
+          }
+          return okBrief(`COC: saved ${entries.length} entries → CyberBase + Obsidian + Canvas`);
+        }
+        // Single save
+        if (!key || !value) return fail('key and value required (or use entries[] for bulk)');
+        const cat = category ?? 'general';
+        cb(cat, key, value);
+        return okBrief(`COC: saved ${cat}:${key} (${value.length} chars) → CyberBase + Obsidian + Canvas`);
+      }
+
+      if (action === 'mirror-db') {
+        if (!cbManager) return fail('no CyberBase connection');
+        ensureVault();
+        // Export all knowledge entries from PostgreSQL and write as .md files
+        const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -A -F '|' -c "SET statement_timeout='30s'; SELECT key, value->>'data', updated_at FROM knowledge WHERE source_tool='omniwire' ORDER BY key;" 2>/dev/null`);
+        if (!r.stdout.trim()) return okBrief('mirror-db: no entries found in CyberBase');
+        const lines = r.stdout.trim().split('\n').filter((l: string) => l.includes('|'));
+        let synced = 0;
+        let skipped = 0;
+        for (const line of lines) {
+          const parts = line.split('|');
+          if (parts.length < 2) { skipped++; continue; }
+          const fullKey = parts[0].trim();
+          const val = parts.slice(1, -1).join('|').trim(); // rejoin in case value has pipes
+          if (!fullKey || !val) { skipped++; continue; }
+          // Parse category:key format
+          const colonIdx = fullKey.indexOf(':');
+          const cat = colonIdx > 0 ? fullKey.slice(0, colonIdx) : 'general';
+          const entryKey = colonIdx > 0 ? fullKey.slice(colonIdx + 1) : fullKey;
+          syncObsidian(cat, entryKey, val);
+          if (val.length > 50) syncCanvas(cat, entryKey, val);
+          synced++;
+        }
+        return okBrief(`COC mirror-db: ${synced} entries synced to Obsidian + Canvas, ${skipped} skipped\n  Vault: ${VAULT_ROOT}`);
       }
 
       return fail('invalid action');

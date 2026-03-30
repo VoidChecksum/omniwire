@@ -19,7 +19,7 @@
 
 **The infrastructure layer for AI agent swarms.**
 
-86 MCP tools · A2A protocol · OmniMesh VPN · nftables firewall · CDP browser · cookie sync · 2FA TOTP · bi-directional sync · CyberBase persistence
+87 MCP tools · A2A protocol · OmniMesh VPN · nftables firewall · CDP browser · cookie sync · 2FA TOTP · bi-directional sync · CyberBase persistence
 
 </div>
 
@@ -687,6 +687,7 @@ omniwire/
 
 | Version | Date | Changes |
 |---------|------|---------|
+| **v3.3.0** | 2026-03-30 | New: `omniwire_coc` tool — unified CyberBase + Obsidian + Canvas sync. Auto-creates vault + canvas. `mirror-db` exports entire DB as .md. Configurable vault via `OMNIWIRE_VAULT_ROOT` env. 87 tools. |
 | **v3.2.2** | 2026-03-30 | Fix: sync GitHub/npm metadata — badge, description, mermaid diagram all reflect 86 tools |
 | **v3.2.1** | 2026-03-30 | New: 5 bi-directional sync tools (`omniwire_sync`, `omniwire_sync_rules`, `omniwire_sync_hooks`, `omniwire_sync_memory`, `omniwire_sync_agents`) — 86 tools total |
 | **v3.2.0** | 2026-03-29 | New: `omniwire_2fa` TOTP manager — add/generate/verify/import/export 2FA codes, CyberBase + 1Password persistence, otpauth:// URI import, bulk code generation |
