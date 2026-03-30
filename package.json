@@ -1,6 +1,6 @@
 {
   "name": "omniwire",
-  "version": "3.4.0",
+  "version": "3.4.1",
   "description": "Infrastructure layer for AI agent swarms — 88 MCP tools · A2A · OmniMesh VPN · Scrapling scraper · COC sync · nftables firewall · CDP browser · 2FA TOTP · ~80ms",
   "license": "GPL-3.0-only",
   "type": "module",

@@ -4763,13 +4763,26 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
 
       // --- Action: install ---
       if (action === 'install') {
-        const installScript = `
-pip install "scrapling[all]" 2>&1 | tail -3
+        // Detect target OS for cross-platform install
+        const targetOs = remoteNodes().find(n => n.id === target)?.os ?? 'linux';
+        const pyCmd = targetOs === 'windows' ? 'python' : 'python3';
+        const pipCmd = targetOs === 'windows' ? 'pip' : 'pip3';
+
+        const installScript = targetOs === 'windows'
+          ? `${pipCmd} install --upgrade "scrapling[all]" 2>&1 | Select-Object -Last 3; scrapling install 2>&1 | Select-Object -Last 3; ${pyCmd} -c "import scrapling; print('scrapling', scrapling.__version__)" 2>&1`
+          : `
+# Ensure Python 3.10+ and pip are available
+command -v ${pyCmd} &>/dev/null || { echo "ERROR: ${pyCmd} not found — install Python 3.10+"; exit 1; }
+command -v ${pipCmd} &>/dev/null || { ${pyCmd} -m ensurepip --upgrade 2>&1 | tail -1; }
+# Install/upgrade Scrapling and all dependencies
+${pipCmd} install --upgrade "scrapling[all]" 2>&1 | tail -3
+# Download/update Playwright + Camoufox browsers
 scrapling install 2>&1 | tail -3
-python3 -c "import scrapling; print('scrapling', scrapling.__version__)" 2>&1
-# Set up systemd service if not exists
-if [ ! -f /etc/systemd/system/scrapling-mcp.service ]; then
-  cat > /etc/systemd/system/scrapling-mcp.service << 'UNIT'
+${pyCmd} -c "import scrapling; print('scrapling', scrapling.__version__)" 2>&1
+# Set up systemd service if available
+if command -v systemctl &>/dev/null; then
+  if [ ! -f /etc/systemd/system/scrapling-mcp.service ]; then
+    cat > /etc/systemd/system/scrapling-mcp.service << 'UNIT'
 [Unit]
 Description=Scrapling MCP HTTP Server
 After=network.target
@@ -4782,13 +4795,38 @@ Environment=HOME=/root
 [Install]
 WantedBy=multi-user.target
 UNIT
-  systemctl daemon-reload
-  systemctl enable scrapling-mcp
-  systemctl start scrapling-mcp
-  echo "systemd service created and started"
+    systemctl daemon-reload
+    systemctl enable scrapling-mcp
+    systemctl start scrapling-mcp
+    echo "systemd service created and started"
+  else
+    systemctl restart scrapling-mcp
+    echo "systemd service restarted"
+  fi
+elif command -v launchctl &>/dev/null; then
+  # macOS: create launchd plist
+  PLIST="/Library/LaunchDaemons/com.scrapling.mcp.plist"
+  if [ ! -f "$PLIST" ]; then
+    cat > "$PLIST" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.scrapling.mcp</string>
+<key>ProgramArguments</key><array><string>/usr/local/bin/scrapling</string><string>mcp</string><string>--http</string><string>--port</string><string>8931</string></array>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+</dict></plist>
+PLIST
+    launchctl load "$PLIST"
+    echo "launchd service created and loaded"
+  else
+    launchctl unload "$PLIST" 2>/dev/null; launchctl load "$PLIST"
+    echo "launchd service reloaded"
+  fi
 else
-  systemctl restart scrapling-mcp
-  echo "systemd service restarted"
+  # Fallback: run in background with nohup
+  nohup scrapling mcp --http --port 8931 &>/tmp/scrapling-mcp.log &
+  echo "started in background (no service manager)"
 fi`.trim();
         const r = await manager.exec(target, installScript);
         return okBrief(`Scrapling install on ${target}:\n${r.stdout.trim()}`);
@@ -4796,7 +4834,12 @@ fi`.trim();
 
       // --- Action: status ---
       if (action === 'status') {
-        const r = await manager.exec(target, `python3 -c "import scrapling; print('version:', scrapling.__version__)" 2>&1; systemctl is-active scrapling-mcp 2>/dev/null || echo "no systemd"; curl -s --connect-timeout 2 http://localhost:8931/ 2>&1 | head -1 || echo "MCP server not reachable"`);
+        const targetOs = remoteNodes().find(n => n.id === target)?.os ?? 'linux';
+        const pyCmd = targetOs === 'windows' ? 'python' : 'python3';
+        const statusScript = targetOs === 'windows'
+          ? `${pyCmd} -c "import scrapling; print('version:', scrapling.__version__)" 2>&1; curl -s --connect-timeout 2 http://localhost:8931/ 2>&1 | head -1`
+          : `${pyCmd} -c "import scrapling; print('version:', scrapling.__version__)" 2>&1; systemctl is-active scrapling-mcp 2>/dev/null || (launchctl list com.scrapling.mcp 2>/dev/null && echo "launchd") || echo "no service manager"; curl -s --connect-timeout 2 http://localhost:8931/ 2>&1 | head -1 || echo "MCP server not reachable"`;
+        const r = await manager.exec(target, statusScript);
         return okBrief(`Scrapling on ${target}:\n${r.stdout.trim()}`);
       }
 
@@ -4875,7 +4918,9 @@ print(json.dumps(results))
 
       try {
         // Route through VPN if requested, otherwise direct exec via WireGuard mesh
-        let execCmd = `python3 -c ${JSON.stringify(script)}`;
+        const targetOs = remoteNodes().find(n => n.id === target)?.os ?? 'linux';
+        const pyCmd = targetOs === 'windows' ? 'python' : 'python3';
+        let execCmd = `${pyCmd} -c ${JSON.stringify(script)}`;
         if (via_vpn) execCmd = buildVpnWrappedCmd(via_vpn, execCmd);
         const r = await manager.exec(target, execCmd);
         const output = r.stdout.trim();

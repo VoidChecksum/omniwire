@@ -687,7 +687,8 @@ omniwire/
 
 | Version | Date | Changes |
 |---------|------|---------|
-| **v3.4.0** | 2026-03-30 | Rewrite: `omniwire_scrape` — OmniMesh-routed Scrapling with auto-install, VPN routing, adaptive selectors, XPath, bulk sessions. install/status actions. Full README audit (88 tools everywhere). |
+| **v3.4.1** | 2026-03-30 | Cross-OS: `omniwire_scrape` install works on Linux (systemd), macOS (launchd), Windows, Docker (nohup). Auto-upgrades deps + browsers. Python/pip path detection. |
+| **v3.4.0** | 2026-03-30 | Rewrite: `omniwire_scrape` — OmniMesh-routed Scrapling with auto-install, VPN routing, adaptive selectors, XPath, bulk sessions. install/status actions. Full README audit (88 tools). |
 | **v3.3.1** | 2026-03-30 | New: `omniwire_scrape` tool — Scrapling-powered web scraping (static/browser/stealth modes, Cloudflare bypass, TLS spoofing). |
 | **v3.3.0** | 2026-03-30 | New: `omniwire_coc` tool — unified CyberBase + Obsidian + Canvas sync. Auto-creates vault + canvas. `mirror-db` exports entire DB as .md. Configurable vault via `OMNIWIRE_VAULT_ROOT` env. |
 | **v3.2.2** | 2026-03-30 | Fix: sync GitHub/npm metadata — badge, description, mermaid diagram all reflect 86 tools |
