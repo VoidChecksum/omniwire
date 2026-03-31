@@ -1,0 +1,17 @@
+{
+  "tools": {
+    "sandbox": "docker"
+  },
+  "mcpServers": {
+    "omg_cli_tools": {
+      "command": "oh-my-gemini",
+      "args": [
+        "tools",
+        "serve"
+      ]
+    }
+  },
+  "experimental": {
+    "enableAgents": true
+  }
+}
