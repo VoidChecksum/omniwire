@@ -69,7 +69,7 @@ Add to your AI agent (Claude Code, Cursor, OpenCode, etc.):
 ### DevOps & Infrastructure
 ```bash
 # Deploy to all nodes in one call
-omniwire_deploy(src="contabo:/app/v2.tar.gz", dst="/opt/app/")
+omniwire_deploy(src="node-a:/app/v2.tar.gz", dst="/opt/app/")
 
 # Rolling service restart
 omniwire_batch([
@@ -88,14 +88,14 @@ omniwire_disk_usage()
 ```bash
 # Anonymous nmap through Mullvad VPN
 omniwire_exec(
-  node="contabo",
+  node="node-a",
   command="nmap -sV -T4 target.com",
   via_vpn="mullvad:se",
   background=true
 )
 
 # Rotate exit IP between scans
-omniwire_vpn(action="rotate", node="contabo")
+omniwire_vpn(action="rotate", node="node-a")
 
 # Run nuclei through VPN namespace
 omniwire_exec(command="nuclei -u target.com",
@@ -133,7 +133,7 @@ omniwire_a2a_message(action="send",
 # Long build in background
 omniwire_exec(
   command="docker build -t app .",
-  node="contabo", background=true
+  node="node-a", background=true
 )
 # Returns: "BACKGROUND bg-abc123"
 
@@ -146,8 +146,8 @@ omniwire_bg(action="result", task_id="bg-abc123")
 
 # Pipeline: build → test → deploy
 omniwire_pipeline(steps=[
-  {node: "contabo", command: "make build"},
-  {node: "contabo", command: "make test"},
+  {node: "node-a", command: "make build"},
+  {node: "node-a", command: "make test"},
   {command: "deploy.sh", store_as: "version"}
 ])
 ```
@@ -161,14 +161,14 @@ omniwire_pipeline(steps=[
 ```bash
 # Transfer large dataset between nodes
 omniwire_transfer_file(
-  src="contabo:/data/model.bin",
+  src="node-a:/data/model.bin",
   dst="hostinger:/ml/model.bin"
 )
 # Auto-selects: aria2c (16-conn parallel)
 
 # Sync config to all nodes
 omniwire_deploy(
-  src_node="contabo",
+  src_node="node-a",
   src_path="/etc/nginx/nginx.conf",
   dst_path="/etc/nginx/nginx.conf"
 )
@@ -181,7 +181,7 @@ omniwire_deploy(
 ```bash
 # Full Mullvad setup for a node
 omniwire_vpn(action="connect", server="se",
-  node="contabo")
+  node="node-a")
 omniwire_vpn(action="quantum", config="on")
 omniwire_vpn(action="daita", config="on")
 omniwire_vpn(action="multihop", config="se:us")
@@ -189,7 +189,7 @@ omniwire_vpn(action="dns", config="adblock")
 omniwire_vpn(action="killswitch", config="on")
 
 # Verify anonymous IP
-omniwire_vpn(action="ip", node="contabo")
+omniwire_vpn(action="ip", node="node-a")
 
 # Node-wide VPN (mesh stays connected)
 omniwire_vpn(action="full-on", server="de")
@@ -672,7 +672,7 @@ Create `~/.omniwire/mesh.json`:
 | **SSH key pair** | Ed25519 recommended — `ssh-keygen -t ed25519 -f ~/.ssh/id_omniwire` |
 | **SSH access to nodes** | Key deployed to `~/.ssh/authorized_keys` on every remote node |
 | **1Password CLI** | `op` v2+, signed in — required for `omniwire_secrets` and cookie sync to vault |
-| **PostgreSQL (optional)** | Required only for CyberSync / CyberBase persistence — Contabo hosts it at `10.10.0.1:5432` |
+| **PostgreSQL (optional)** | Required only for CyberSync / CyberBase persistence — Node A hosts it (configure CYBERSYNC_DB_URL accordingly) |
 
 ### Install OmniWire
 
@@ -689,22 +689,22 @@ wg genkey | tee /etc/wireguard/node_private.key | wg pubkey > /etc/wireguard/nod
 cat /etc/wireguard/node_pub.key
 ```
 
-**2. Assign it a mesh IP** (next available in `10.10.0.0/24`):
+**2. Assign it a mesh IP** (next available in `10.0.0.0/24`):
 
 | Node | Mesh IP | Role |
 |------|---------|------|
-| Contabo (hub) | `10.10.0.1` | storage, CyberBase |
-| Hostinger | `10.10.0.2` | compute |
-| Windows PC | `10.10.0.3` | local dev |
-| ThinkPad | `10.10.0.4` | local dev |
-| _new node_ | `10.10.0.N` | assign next |
+| Node A (hub) | `10.0.0.1` | storage, CyberBase |
+| Hostinger | `10.0.0.2` | compute |
+| Windows PC | `10.0.0.3` | local dev |
+| ThinkPad | `10.0.0.4` | local dev |
+| _new node_ | `10.0.0.N` | assign next |
 
 **3. Register the node with OmniMesh** (run from any node already in the mesh):
 ```bash
 omniwire_omnimesh(action="add-peer",
   id="newnode",
   public_key="<pubkey from step 1>",
-  allowed_ips="10.10.0.N/32",
+  allowed_ips="10.0.0.N/32",
   endpoint="<public IP or DNS>:51820"
 )
 ```
@@ -717,7 +717,7 @@ omniwire_omnimesh(action="sync-peers")
 **5. Bring the interface up on the new node:**
 ```bash
 wg-quick up wg0
-ping 10.10.0.1   # verify hub reachability
+ping 10.0.0.1   # verify hub reachability
 ```
 
 ### Configure OmniWire on the New Node
@@ -727,10 +727,10 @@ Add the node to `~/.omniwire/mesh.json` (create if absent):
 ```json
 {
   "nodes": [
-    { "id": "contabo",   "host": "10.10.0.1", "user": "root", "identityFile": "~/.ssh/id_omniwire", "role": "storage" },
-    { "id": "hostinger", "host": "10.10.0.2", "user": "root", "identityFile": "~/.ssh/id_omniwire", "role": "compute" },
-    { "id": "windows",   "host": "10.10.0.3", "user": "Admin", "identityFile": "~/.ssh/id_omniwire", "role": "local" },
-    { "id": "thinkpad",  "host": "10.10.0.4", "user": "user",  "identityFile": "~/.ssh/id_omniwire", "role": "local" }
+    { "id": "node-a",   "host": "10.0.0.1", "user": "root", "identityFile": "~/.ssh/id_omniwire", "role": "storage" },
+    { "id": "hostinger", "host": "10.0.0.2", "user": "root", "identityFile": "~/.ssh/id_omniwire", "role": "compute" },
+    { "id": "windows",   "host": "10.0.0.3", "user": "Admin", "identityFile": "~/.ssh/id_omniwire", "role": "local" },
+    { "id": "thinkpad",  "host": "10.0.0.4", "user": "user",  "identityFile": "~/.ssh/id_omniwire", "role": "local" }
   ]
 }
 ```
@@ -764,12 +764,12 @@ omniwire_mesh_status()   # 88 tools should be available
 |----------|----------|-------------|
 | `OP_SERVICE_ACCOUNT_TOKEN` | For 1Password sync | Service account token from 1Password |
 | `OMNIWIRE_VAULT_ROOT` | Optional | Path to Obsidian vault root (default: CyberBase vault) |
-| `CYBERSYNC_DB_URL` | Optional | PostgreSQL DSN — defaults to `postgresql://cyberbase@10.10.0.1:5432/cyberbase` |
+| `CYBERSYNC_DB_URL` | Optional | PostgreSQL DSN — defaults to `postgresql://cyberbase@10.0.0.1:5432/cyberbase` |
 | `OMNIWIRE_MESH_CONFIG` | Optional | Override mesh.json path |
 
 Set persistently on a node:
 ```bash
-omniwire_env(action="set", key="OP_SERVICE_ACCOUNT_TOKEN", value="<token>", node="contabo", persist=true)
+omniwire_env(action="set", key="OP_SERVICE_ACCOUNT_TOKEN", value="<token>", node="node-a", persist=true)
 ```
 
 ### CyberSync Auto-Distribution
@@ -815,7 +815,7 @@ On first run, CyberSync pulls node configs, 2FA seeds, and Claude memories from 
 
 **`omniwire_firewall`**: nftables-based firewall engine with 17 actions. Presets (server, paranoid, minimal, pentest), rate-limiting, geo-blocking by country, port-knocking sequences, IP ban/unban, whitelist/blacklist, rule management, audit log, save/restore.
 
-**Zero mesh impact**: wg0, wg1, tailscale0, and all mesh CIDRs (10.10.0.0/24, 10.20.0.0/24, 100.64.0.0/10) are always whitelisted before any hardening rules. nftables runs in kernel space — zero latency overhead.
+**Zero mesh impact**: wg0, wg1, tailscale0, and all mesh CIDRs (10.0.0.0/24, 10.20.0.0/24, 100.64.0.0/10) are always whitelisted before any hardening rules. nftables runs in kernel space — zero latency overhead.
 
 </details>
 
