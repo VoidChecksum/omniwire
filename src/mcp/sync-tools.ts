@@ -269,10 +269,10 @@ export function registerSyncTools(
     }
   );
 
-  // --- Tool 35: omniwire_cookies ---
+  // --- Tool 35: cybersync_cookies ---
   server.tool(
-    'omniwire_cookies',
-    'Manage browser cookies across mesh nodes. Store/retrieve/import/export in json/header/netscape format and sync to remote nodes via SSH.',
+    'cybersync_cookies',
+    'Manage browser cookies across mesh nodes with CyberBase persistence. Store/retrieve/import/export in json/header/netscape format and sync to remote nodes via SSH.',
     {
       action: z.enum(['set', 'get', 'list', 'delete', 'import', 'export', 'sync']).describe('Action to perform'),
       domain: z.string().optional().describe('Cookie domain (required for set/get/delete/sync/export)'),
