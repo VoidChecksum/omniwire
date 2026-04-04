@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 
-export function startSSEServer(server: McpServer, port: number): void {
+export function startSSEServer(server: McpServer, port: number, bind = '127.0.0.1'): void {
   let transport: SSEServerTransport | null = null;
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -49,5 +49,5 @@ export function startSSEServer(server: McpServer, port: number): void {
     res.end(JSON.stringify({ error: 'Not found. Endpoints: GET /sse, POST /message, GET /health' }));
   });
 
-  httpServer.listen(port, '127.0.0.1');
+  httpServer.listen(port, bind);
 }

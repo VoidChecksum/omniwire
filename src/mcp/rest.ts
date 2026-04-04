@@ -21,7 +21,7 @@ function json(res: ServerResponse, status: number, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
-export function startRESTServer(manager: NodeManager, transfer: TransferEngine, port: number): void {
+export function startRESTServer(manager: NodeManager, transfer: TransferEngine, port: number, bind = '127.0.0.1'): void {
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader('Access-Control-Allow-Origin', 'http://localhost');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
@@ -117,5 +117,5 @@ export function startRESTServer(manager: NodeManager, transfer: TransferEngine, 
     }
   });
 
-  httpServer.listen(port, '127.0.0.1');
+  httpServer.listen(port, bind);
 }

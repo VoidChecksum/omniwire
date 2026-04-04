@@ -252,7 +252,7 @@ export const eventBus = new OmniWireEventBus();
 
 // --- HTTP + WebSocket Server ---
 
-export function startEventServer(port: number): void {
+export function startEventServer(port: number, bind = '127.0.0.1'): void {
   const httpServer = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -371,5 +371,5 @@ export function startEventServer(port: number): void {
     }
   });
 
-  httpServer.listen(port, '0.0.0.0');
+  httpServer.listen(port, bind);
 }
