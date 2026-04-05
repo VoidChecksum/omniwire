@@ -14,7 +14,7 @@ import { startRESTServer } from './rest.js';
 import { SyncDB } from '../sync/db.js';
 import { SyncEngine } from '../sync/engine.js';
 import { getManifests } from '../sync/manifest.js';
-import { allNodes } from '../protocol/config.js';
+import { allNodes, getLocalNodeId } from '../protocol/config.js';
 import { DEFAULT_SYNC_CONFIG } from '../sync/types.js';
 import type { SyncConfig } from '../sync/types.js';
 import { startEventServer, eventBus } from './events.js';
@@ -37,15 +37,6 @@ function log(msg: string, data?: Record<string, unknown>): void {
   }
 }
 
-function detectNodeId(): string {
-  if (process.platform === 'win32') return 'windows';
-  const hostname = (process.env.HOSTNAME ?? '').toLowerCase();
-  if (hostname.includes('contabo')) return 'contabo';
-  if (hostname.includes('hostinger')) return 'hostinger';
-  if (hostname.includes('thinkpad')) return 'thinkpad';
-  return 'unknown';
-}
-
 async function main(): Promise<void> {
   const manager = new NodeManager();
   await manager.connectAll();
@@ -57,13 +48,13 @@ async function main(): Promise<void> {
   let syncDb: SyncDB | null = null;
   if (!noSync) {
     try {
-      const nodeId = detectNodeId();
+      const nodeId = getLocalNodeId();
       const config: SyncConfig = { ...DEFAULT_SYNC_CONFIG, nodeId };
       syncDb = new SyncDB(config);
       await syncDb.init();
 
       const node = allNodes().find((n) => n.id === nodeId);
-      const os = node?.os ?? 'windows';
+      const os = node?.os ?? 'linux';
       const manifests = getManifests(os);
       const engine = new SyncEngine(syncDb, config, manager, transfer);
 

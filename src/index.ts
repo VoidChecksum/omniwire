@@ -16,7 +16,7 @@ import { ClaudeIntegration } from './claude/integration.js';
 import {
   banner, prompt as makePrompt, nodeColor, dim, red, yellow, cyan, Spinner,
 } from './ui/format.js';
-import { allNodes } from './protocol/config.js';
+import { allNodes, getLocalNodeId } from './protocol/config.js';
 
 async function main(): Promise<void> {
   const manager = new NodeManager();
@@ -87,7 +87,7 @@ async function main(): Promise<void> {
 
       switch (parsed.target.type) {
         case 'local': {
-          const result = await manager.exec('windows', parsed.raw || input);
+          const result = await manager.exec(getLocalNodeId(), parsed.raw || input);
           if (result.stderr && result.code !== 0) {
             output = red(result.stderr);
           } else {

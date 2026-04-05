@@ -4,7 +4,7 @@
 import type { NodeManager } from '../nodes/manager.js';
 import type { TransferEngine } from '../nodes/transfer.js';
 import type { ExecResult } from '../protocol/types.js';
-import { allNodes, findNode, NODE_ROLES, getDefaultNodeForTask } from '../protocol/config.js';
+import { allNodes, findNode, NODE_ROLES, getDefaultNodeForTask, getDockerNode, getLocalNodeId } from '../protocol/config.js';
 import { parseMeshPath } from '../protocol/paths.js';
 import { openBrowser } from './browser.js';
 import { formatTable, nodeColor, dim, bold, red, green, yellow, cyan } from '../ui/format.js';
@@ -167,7 +167,7 @@ async function cmdUpload(args: string[]): Promise<string> {
   if (!parsed) return red('Invalid destination. Use node:/path format.');
 
   try {
-    const result = await transferEngine.transfer('windows', localPath, parsed.nodeId, parsed.path);
+    const result = await transferEngine.transfer(getLocalNodeId(), localPath, parsed.nodeId, parsed.path);
     return green(`Uploaded ${localPath} → ${parsed.nodeId}:${parsed.path} (${result.speedMBps.toFixed(1)} MB/s)`);
   } catch (e) {
     return red(`Upload failed: ${(e as Error).message}`);
@@ -183,7 +183,7 @@ async function cmdDownload(args: string[]): Promise<string> {
   if (!parsed) return red('Invalid source. Use node:/path format.');
 
   try {
-    const result = await transferEngine.transfer(parsed.nodeId, parsed.path, 'windows', localPath);
+    const result = await transferEngine.transfer(parsed.nodeId, parsed.path, getLocalNodeId(), localPath);
     return green(`Downloaded ${parsed.nodeId}:${parsed.path} → ${localPath} (${result.speedMBps.toFixed(1)} MB/s)`);
   } catch (e) {
     return red(`Download failed: ${(e as Error).message}`);
@@ -253,7 +253,7 @@ async function cmdBrowser(args: string[], manager: NodeManager): Promise<string>
 async function cmdDocker(raw: string, manager: NodeManager): Promise<string> {
   const dockerCmd = raw.trim();
   if (!dockerCmd) return red('Usage: @docker <command>');
-  const nodeId = 'contabo';
+  const nodeId = getDockerNode();
   const result = await manager.exec(nodeId, `docker ${dockerCmd}`);
   return `${nodeColor(nodeId)} docker ${dockerCmd}\n${result.code === 0 ? result.stdout : red(result.stderr)}`;
 }

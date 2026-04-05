@@ -4,7 +4,7 @@ import { Client, type ConnectConfig } from 'ssh2';
 import { readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import type { MeshNode, NodeStatus, ExecResult } from '../protocol/types.js';
-import { remoteNodes, getHostCandidates } from '../protocol/config.js';
+import { remoteNodes, getHostCandidates, getLocalNodeId } from '../protocol/config.js';
 
 interface NodeConnection {
   node: MeshNode;
@@ -179,7 +179,7 @@ export class NodeManager {
   }
 
   getClient(nodeId: string): Client | null {
-    if (nodeId === 'windows') return null;
+    if (nodeId === getLocalNodeId()) return null;
     const conn = this.connections.get(nodeId);
     return conn?.connected ? conn.client : null;
   }
@@ -189,7 +189,7 @@ export class NodeManager {
   }
 
   isConnected(nodeId: string): boolean {
-    if (nodeId === 'windows') return true;
+    if (nodeId === getLocalNodeId()) return true;
     return this.connections.get(nodeId)?.connected ?? false;
   }
 
@@ -198,7 +198,7 @@ export class NodeManager {
   }
 
   getOnlineNodes(): string[] {
-    const online = ['windows'];
+    const online = [getLocalNodeId()];
     for (const [id, conn] of this.connections) {
       if (conn.connected) online.push(id);
     }
@@ -274,7 +274,7 @@ export class NodeManager {
   async exec(nodeId: string, command: string): Promise<ExecResult> {
     const start = Date.now();
 
-    if (nodeId === 'windows') {
+    if (nodeId === getLocalNodeId()) {
       return this.execLocal(command, start);
     }
 
@@ -413,10 +413,10 @@ export class NodeManager {
   getBestNode(exclude?: string[]): string {
     const excluded = new Set(exclude ?? []);
     const candidates = this.getOnlineNodes().filter(
-      (id) => id !== 'windows' && !excluded.has(id)
+      (id) => id !== getLocalNodeId() && !excluded.has(id)
     );
 
-    if (candidates.length === 0) return 'windows';
+    if (candidates.length === 0) return getLocalNodeId();
 
     let best = candidates[0];
     let bestAvg = this.avgLatency(best);
@@ -444,9 +444,9 @@ export class NodeManager {
   }[] {
     const stats = [];
 
-    // Always include the local windows node
+    // Always include the local node
     stats.push({
-      node: 'windows',
+      node: getLocalNodeId(),
       connected: true,
       activeHost: 'localhost',
       avgLatencyMs: 0,
@@ -476,7 +476,7 @@ export class NodeManager {
         maxBuffer: MAX_OUTPUT_BYTES,
       }, (err, stdout, stderr) => {
         resolve({
-          nodeId: 'windows',
+          nodeId: getLocalNodeId(),
           stdout: (stdout ?? '').trimEnd(),
           stderr: (stderr ?? '').trimEnd(),
           code: err ? ((err as Record<string, unknown>).code as number | undefined) ?? 1 : 0,
@@ -491,7 +491,7 @@ export class NodeManager {
   }
 
   async execRemote(command: string): Promise<ExecResult[]> {
-    return Promise.all(this.getOnlineNodes().filter((id) => id !== 'windows').map((id) => this.exec(id, command)));
+    return Promise.all(this.getOnlineNodes().filter((id) => id !== getLocalNodeId()).map((id) => this.exec(id, command)));
   }
 
   async execOn(nodeIds: string[], command: string): Promise<ExecResult[]> {
@@ -499,8 +499,8 @@ export class NodeManager {
   }
 
   async getNodeStatus(nodeId: string): Promise<NodeStatus> {
-    if (nodeId === 'windows') {
-      return { nodeId: 'windows', online: true, latencyMs: 0, lastSeen: new Date(), uptime: null, loadAvg: null, memUsedPct: null, diskUsedPct: null };
+    if (nodeId === getLocalNodeId()) {
+      return { nodeId: getLocalNodeId(), online: true, latencyMs: 0, lastSeen: new Date(), uptime: null, loadAvg: null, memUsedPct: null, diskUsedPct: null };
     }
 
     const cached = this.statusCache.get(nodeId);
@@ -533,7 +533,7 @@ export class NodeManager {
   }
 
   async getAllStatus(): Promise<NodeStatus[]> {
-    const ids = ['windows', ...remoteNodes().map((n) => n.id)];
+    const ids = [getLocalNodeId(), ...remoteNodes().map((n) => n.id)];
     return Promise.all(ids.map((id) => this.getNodeStatus(id)));
   }
 
@@ -543,7 +543,7 @@ export class NodeManager {
     onData: (chunk: string) => void,
     onError: (chunk: string) => void
   ): Promise<number> {
-    if (nodeId === 'windows') {
+    if (nodeId === getLocalNodeId()) {
       return new Promise((resolve) => {
         const proc = execFile('bash', ['-c', command], { timeout: 60000 });
         proc.stdout?.on('data', (d) => onData(d.toString()));

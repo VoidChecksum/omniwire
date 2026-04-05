@@ -87,7 +87,7 @@ export class SyncEngine {
       if (shouldSkipPath(item.relPath)) continue;
 
       const localNode = allNodes().find((n) => n.id === this.config.nodeId);
-      const os = localNode?.os ?? 'windows';
+      const os = localNode?.os ?? 'linux';
       const baseDir = getToolBaseDir(item.tool, os);
       const absPath = join(baseDir, item.relPath);
 
@@ -226,7 +226,7 @@ export class SyncEngine {
 
     for (const item of dbItems) {
       const localNode = allNodes().find((n) => n.id === this.config.nodeId);
-      const os = localNode?.os ?? 'windows';
+      const os = localNode?.os ?? 'linux';
       const baseDir = getToolBaseDir(item.tool, os);
       const absPath = join(baseDir, item.relPath);
 

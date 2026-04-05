@@ -5,7 +5,7 @@
 
 import { spawn } from 'node:child_process';
 import type { NodeManager } from '../nodes/manager.js';
-import { allNodes, NODE_ROLES } from '../protocol/config.js';
+import { allNodes, NODE_ROLES, getLocalNodeId, getDbNode, getBrowserNode, getComputeNode } from '../protocol/config.js';
 import { cyan, dim, green, red, Spinner } from '../ui/format.js';
 
 export class ClaudeIntegration {
@@ -50,21 +50,24 @@ export class ClaudeIntegration {
       })
       .join('\n');
 
+    const roleList = allNodes().map((n) => {
+      const role = NODE_ROLES[n.id] ?? 'unknown';
+      const tags = n.tags.length ? ` [${n.tags.join(', ')}]` : '';
+      return `- ${n.id} (${role}): ${n.os}${n.isLocal ? ' (local)' : ''}${tags}`;
+    }).join('\n');
+
     return `OMNIWIRE MESH STATUS:
 Nodes:
 ${nodeList}
 
 NODE ROLES:
-- windows (controller): OmniWire host, Claude Code, REPL
-- contabo (storage): Primary storage (1.2TB), Docker host, DB, file server
-- hostinger (compute): Secondary compute, services
-- thinkpad (gpu+browser): GPU workloads, browser automation, GUI apps
+${roleList}
 
 ROUTING DEFAULTS:
-- File storage/retrieval â contabo
-- Browser/GUI ops â thinkpad
-- Heavy compute â contabo or thinkpad
-- Local dev â windows
+- File storage/retrieval \u2192 ${getDbNode()}
+- Browser/GUI ops \u2192 ${getBrowserNode()}
+- Heavy compute \u2192 ${getComputeNode()}
+- Local dev \u2192 ${getLocalNodeId()}
 
 MCP TOOLS AVAILABLE:
 You have 22 omniwire_* tools for direct mesh access via MCP.

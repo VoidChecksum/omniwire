@@ -15,7 +15,7 @@ import { ShellManager, kernelExec } from '../nodes/shell.js';
 import { RealtimeChannel } from '../nodes/realtime.js';
 import { TunnelManager } from '../nodes/tunnel.js';
 import { openBrowser } from '../commands/browser.js';
-import { allNodes, remoteNodes, findNode, NODE_ROLES, getDefaultNodeForTask, CONFIG } from '../protocol/config.js';
+import { allNodes, remoteNodes, findNode, NODE_ROLES, getDefaultNodeForTask, CONFIG, getLocalNodeId, getDbNode, getDockerNode, getBrowserNode } from '../protocol/config.js';
 import { parseMeshPath } from '../protocol/paths.js';
 import {
   genKeysCmd, parseKeys, buildWgConfig, wgConfigPath, bringUpCmd, bringDownCmd,
@@ -271,7 +271,7 @@ async function drainCb() {
   const batch = CB_QUEUE.splice(0, 10);
   const combined = batch.join(' ');
   try {
-    const r = await cbManager.exec('contabo', pgExec(combined));
+    const r = await cbManager.exec(getDbNode(), pgExec(combined));
     if (r.code === 0 || r.stdout.includes('INSERT') || r.stdout.includes('UPDATE')) {
       cbRecordSuccess();
     } else {
@@ -519,7 +519,7 @@ async function cbGet(category: string, key: string): Promise<string | null> {
   if (!cbManager) return null;
   const fullKey = `${category}:${key}`.replace(/'/g, "''");
   try {
-    const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';SELECT value->>'data' FROM knowledge WHERE source_tool='omniwire' AND key='${fullKey}';" 2>/dev/null`);
+    const r = await cbManager.exec(getDbNode(), `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';SELECT value->>'data' FROM knowledge WHERE source_tool='omniwire' AND key='${fullKey}';" 2>/dev/null`);
     const val = r.stdout.trim();
     return val || null;
   } catch { return null; }
@@ -530,7 +530,7 @@ async function cbList(category: string): Promise<string[]> {
   if (!cbManager) return [];
   const prefix = `${category}:`.replace(/'/g, "''");
   try {
-    const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';SELECT replace(key, '${prefix}', '') FROM knowledge WHERE source_tool='omniwire' AND key LIKE '${prefix}%' ORDER BY updated_at DESC LIMIT 100;" 2>/dev/null`);
+    const r = await cbManager.exec(getDbNode(), `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';SELECT replace(key, '${prefix}', '') FROM knowledge WHERE source_tool='omniwire' AND key LIKE '${prefix}%' ORDER BY updated_at DESC LIMIT 100;" 2>/dev/null`);
     return r.stdout.trim().split('\n').map(s => s.trim()).filter(Boolean);
   } catch { return []; }
 }
@@ -541,7 +541,7 @@ async function cbSearch(query: string, sourceFilter?: string): Promise<string> {
   const srcFilter = sourceFilter ? `AND source_tool='${sourceFilter}'` : '';
   const escaped = query.replace(/'/g, "''");
   try {
-    const r = await cbManager.exec('contabo',
+    const r = await cbManager.exec(getDbNode(),
       `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';SELECT source_tool, key, substring(value::text,1,200) FROM knowledge WHERE (value::text ILIKE '%${escaped}%' OR key ILIKE '%${escaped}%') ${srcFilter} ORDER BY updated_at DESC LIMIT 20;" 2>/dev/null`
     );
     return r.stdout.trim();
@@ -554,7 +554,7 @@ async function cbSemanticSearch(query: string, limit: number = 10): Promise<stri
   const escaped = query.replace(/'/g, "''");
   try {
     // Try pgvector cosine similarity first
-    const r = await cbManager.exec('contabo',
+    const r = await cbManager.exec(getDbNode(),
       `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';
         SELECT source_tool, key, substring(value::text,1,300)
         FROM knowledge
@@ -565,7 +565,7 @@ async function cbSemanticSearch(query: string, limit: number = 10): Promise<stri
     );
     if (r.stdout.trim()) return r.stdout.trim();
     // Fallback: ILIKE full-text
-    const r2 = await cbManager.exec('contabo',
+    const r2 = await cbManager.exec(getDbNode(),
       `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';
         SELECT source_tool, key, substring(value::text,1,300)
         FROM knowledge
@@ -663,7 +663,7 @@ export function createOmniWireServer(manager: NodeManager, transfer: TransferEng
       if (!command && !script) {
         return fail('either command or script is required');
       }
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const timeoutSec = timeout ?? 30;
       const maxRetries = retry ?? 0;
       const useJson = format === 'json';
@@ -1012,13 +1012,13 @@ tags: ${meshNode.tags.join(', ')}`;
   // --- Tool 15: omniwire_docker ---
   server.tool(
     'omniwire_docker',
-    'Run docker commands on a node. Default: contabo.',
+    'Run docker commands on a node. Default: docker host.',
     {
       command: z.string().describe('Docker subcommand (ps, run, logs, images, etc.)'),
-      node: z.string().optional().describe('Node id (default: contabo)'),
+      node: z.string().optional().describe('Node id (default: docker host)'),
     },
     async ({ command, node }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDockerNode();
       const result = await manager.exec(nodeId, `docker ${command}`);
       if (result.code !== 0) return fail(`${nodeId} docker ${command}: ${result.stderr}`);
       return ok(nodeId, result.durationMs, result.stdout, `docker ${command.split(' ')[0]}`);
@@ -1071,10 +1071,10 @@ tags: ${meshNode.tags.join(', ')}`;
           const bindAddr = mesh_bind === 'all' ? '0.0.0.0' : '$(ip -4 addr show wg0 2>/dev/null | grep -oP "inet \\K[0-9.]+" || echo "0.0.0.0")';
           const id = `mesh-fwd-${info.id}`;
           const stateDir = '/tmp/.omniwire-mesh-expose';
-          const localNode = CONFIG.nodes.find((n) => n.isLocal)?.id ?? 'windows';
-          if (localNode === 'windows') {
+          const localNode = CONFIG.nodes.find((n) => n.isLocal)?.id ?? getLocalNodeId();
+          if (findNode(localNode)?.os === 'windows') {
             // On Windows, the tunnel itself is enough — mesh nodes reach Windows via wg0
-            return okBrief(`tunnel ${info.id}  :${info.localPort} -> ${info.nodeId}:${info.remotePort} (mesh-accessible via ${findNode('windows')?.host ?? 'localhost'}:${info.localPort})`);
+            return okBrief(`tunnel ${info.id}  :${info.localPort} -> ${info.nodeId}:${info.remotePort} (mesh-accessible via ${findNode(getLocalNodeId())?.host ?? 'localhost'}:${info.localPort})`);
           }
           await manager.exec(localNode, `mkdir -p ${stateDir}; BIND=${bindAddr}; socat TCP4-LISTEN:${info.localPort},bind=$BIND,reuseaddr,fork TCP4:127.0.0.1:${info.localPort} >/tmp/${id}.log 2>&1 & echo $! > ${stateDir}/${id}.pid`);
           return okBrief(`tunnel ${info.id}  :${info.localPort} -> ${info.nodeId}:${info.remotePort} (mesh-exposed on wg0:${info.localPort})`);
@@ -1233,7 +1233,7 @@ tags: ${meshNode.tags.join(', ')}`;
       env: z.record(z.string(), z.string()).optional().describe('Environment variables to set'),
     },
     async ({ node, interpreter, script, label, timeout, env }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const interp = interpreter ?? 'bash';
       const timeoutSec = timeout ?? 30;
       const tmpFile = `/tmp/.ow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1279,7 +1279,7 @@ tags: ${meshNode.tags.join(', ')}`;
 
       if (runParallel) {
         const execute = async (item: { node?: string; command: string; label?: string; store_as?: string }) => {
-          const nodeId = item.node ?? 'contabo';
+          const nodeId = item.node ?? getDbNode();
           const resolved = item.command.replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
           const result = await manager.exec(nodeId, resolved);
           if (item.store_as && result.code === 0) resultStore.set(item.store_as, result.stdout.trim());
@@ -1300,7 +1300,7 @@ tags: ${meshNode.tags.join(', ')}`;
       const outputs: string[] = [];
       let prevStdout = '';
       for (const item of commands) {
-        const nodeId = item.node ?? 'contabo';
+        const nodeId = item.node ?? getDbNode();
         let resolved = item.command.replace(/\{\{prev\}\}/g, prevStdout.trim());
         resolved = resolved.replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
         const result = await manager.exec(nodeId, resolved);
@@ -1529,7 +1529,7 @@ tags: ${meshNode.tags.join(', ')}`;
       config: z.string().optional().describe('Config file path or feature value. For multihop: "entry:exit" (e.g. "se:us"). For dns: IP address. For obfuscation: "udp2tcp" or "shadowsocks". For split-tunnel: PID or process name.'),
     },
     async ({ action, node, provider, server: vpnServer, config }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
 
       // Auto-detect provider (prefer mullvad > tailscale > openvpn > wireguard)
       const detectCmd = 'command -v mullvad >/dev/null && echo mullvad || (command -v tailscale >/dev/null && echo tailscale || (command -v openvpn >/dev/null && echo openvpn || (command -v wg >/dev/null && echo wireguard || echo none)))';
@@ -1829,7 +1829,7 @@ tags: ${meshNode.tags.join(', ')}`;
       config: z.string().optional().describe('Additional config. For whitelist/blacklist: IP or CIDR. For preset: override options.'),
     },
     async ({ action, node, rule, config }) => {
-      const targetNodes = node === 'all' ? manager.getOnlineNodes().filter(n => n !== 'windows') : [node ?? 'contabo'];
+      const targetNodes = node === 'all' ? manager.getOnlineNodes().filter(n => n !== getLocalNodeId()) : [node ?? getDbNode()];
 
       // Mesh-safe preamble: ALWAYS allow mesh traffic before any hardening
       const meshWhitelist = [
@@ -2138,7 +2138,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       dst_nodes: z.array(z.string()).optional().describe('Destination nodes for sync'),
     },
     async ({ action, node, domain, format: fmt, cookies: cookieData, file, target_format, dst_nodes }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const cookieDir = '/tmp/.omniwire-cookies';
       const cookieFile = file ?? (domain ? `${cookieDir}/${domain.replace(/\./g, '_')}.txt` : `${cookieDir}/all.txt`);
 
@@ -2203,7 +2203,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         return ok(nodeId, r.durationMs, r.stdout, `extract ${domain ?? 'all'}`);
       }
       if (action === 'sync') {
-        const targets = dst_nodes ?? manager.getOnlineNodes().filter(n => n !== nodeId && n !== 'windows');
+        const targets = dst_nodes ?? manager.getOnlineNodes().filter(n => n !== nodeId && n !== getLocalNodeId());
         const src = await manager.exec(nodeId, `cat "${cookieFile}" 2>/dev/null`);
         if (src.code !== 0) return fail(`No cookies at ${cookieFile}`);
         const b64 = Buffer.from(src.stdout).toString('base64');
@@ -2217,7 +2217,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         // 2. Sync to CyberBase (PostgreSQL on contabo)
         const domainKey = domain ?? 'all';
         const pgEscaped = src.stdout.replace(/'/g, "''");
-        const cyberbaseResult = await manager.exec('contabo',
+        const cyberbaseResult = await manager.exec(getDbNode(),
           `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "SET statement_timeout='5s'; INSERT INTO sync_items (category, key, value, updated_at) VALUES ('cookies', '${domainKey}', '${pgEscaped}', NOW()) ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();" 2>/dev/null && echo "cyberbase: synced" || echo "cyberbase: skipped (no DB)"`
         );
 
@@ -2242,17 +2242,17 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
 
       if (action === 'cyberbase-get') {
         const domainKey = domain ?? 'all';
-        const r = await manager.exec('contabo',
+        const r = await manager.exec(getDbNode(),
           `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s';SELECT value FROM sync_items WHERE category='cookies' AND key='${domainKey}';" 2>/dev/null`
         );
         if (!r.stdout.trim()) return fail(`No cookies for '${domainKey}' in CyberBase`);
-        return ok('contabo', r.durationMs, r.stdout.trim(), `cyberbase cookies: ${domainKey}`);
+        return ok(getDbNode(), r.durationMs, r.stdout.trim(), `cyberbase cookies: ${domainKey}`);
       }
 
       if (action === 'cyberbase-set' && cookieData) {
         const domainKey = domain ?? 'all';
         const pgEsc = cookieData.replace(/'/g, "''");
-        const r = await manager.exec('contabo',
+        const r = await manager.exec(getDbNode(),
           `psql -h 127.0.0.1 -U cyberbase -d cyberbase -c "SET statement_timeout='5s'; INSERT INTO sync_items (category, key, value, updated_at) VALUES ('cookies', '${domainKey}', '${pgEsc}', NOW()) ON CONFLICT (category, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();" 2>/dev/null`
         );
         return r.code === 0 ? okBrief(`Cookies stored in CyberBase: ${domainKey}`) : fail(r.stderr);
@@ -2318,7 +2318,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       full_page: z.boolean().optional().describe('Full page screenshot (default: true)'),
     },
     async ({ action, node, url, selector, value, file: outFile, tab, width, height, wait_ms, full_page }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const tabIdx = tab ?? 0;
       const timeout = wait_ms ?? 10000;
       const getPage = `const pages=await browser.pages();const page=pages[${tabIdx}]||pages[0];if(!page){console.log('no pages open');process.exit(0);}`;
@@ -2527,7 +2527,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       target: z.string().optional().describe('Target for forward type (host:port)'),
     },
     async ({ action, node, type, port, target }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const pd = '/tmp/.omniwire-proxies';
 
       if (action === 'list' || action === 'status') {
@@ -2578,7 +2578,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       ip: z.string().optional().describe('IP for zone-add or block-domain override (default: 0.0.0.0)'),
     },
     async ({ action, node, domain, server, ip }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
 
       if (action === 'resolve') {
         if (!domain) return fail('domain required');
@@ -2634,7 +2634,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       retention_days: z.number().optional().describe('Days to keep for cleanup (default: 30)'),
     },
     async ({ action, node, path, backup_id, retention_days }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const bd = '/var/backups/omniwire';
 
       if (action === 'snapshot') {
@@ -2690,7 +2690,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       tail_lines: z.number().optional().describe('Log lines to tail (default: 50)'),
     },
     async ({ action, node, container, file, tag, context, tail_lines }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
 
       if (action === 'compose-up') {
         const cf = file ? `-f '${file.replace(/'/g, "'\\''")}'` : '';
@@ -2761,7 +2761,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       path: z.string().optional().describe('Certificate file path (for info action)'),
     },
     async ({ action, node, domain, email, path }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
 
       if (action === 'list') {
         const result = await manager.exec(nodeId, "ls /etc/letsencrypt/live/ 2>/dev/null && echo '---pem---' && ls /etc/ssl/certs/*.pem 2>/dev/null | head -20 || echo '(no certs found)'");
@@ -2820,7 +2820,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       password: z.string().optional().describe('Password for passwd action'),
     },
     async ({ action, node, username, ssh_key, password }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
 
       if (action === 'list') {
         const result = await manager.exec(nodeId, "getent passwd | grep -v '/sbin/nologin\|/bin/false\|/usr/sbin/nologin' | awk -F: '{print $1, $3, $6}' | column -t");
@@ -2896,7 +2896,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       fallback_nodes: z.array(z.string()).optional().describe('Fallback nodes if primary is offline'),
     },
     async ({ action, node, schedule_id, command, cron_expr, fallback_nodes }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const sd = '/etc/omniwire/schedules';
 
       if (action === 'list') {
@@ -2952,7 +2952,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       webhook_url: z.string().optional().describe('Webhook URL to POST alert payload to'),
     },
     async ({ action, node, alert_id, metric, threshold, webhook_url }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const ad = '/tmp/.omniwire-alerts';
       const fd = `${ad}/fired`;
 
@@ -3095,7 +3095,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
 
       if (action === 'network') {
         if (!target_node) return fail('target_node required for network benchmark');
-        const srcNode = node ?? 'contabo';
+        const srcNode = node ?? getDbNode();
         const bport = 19876;
         await manager.exec(target_node, `nc -l -p ${bport} > /dev/null &`);
         await new Promise((r) => setTimeout(r, 500));
@@ -3157,7 +3157,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         return okBrief(`clipboard set on ${ok_count} nodes (${content.length} chars)`);
       }
       if (action === 'paste') {
-        const nodeId = node ?? 'contabo';
+        const nodeId = node ?? getDbNode();
         const result = await manager.exec(nodeId, `cat ${clipPath} 2>/dev/null || echo '(empty)'`);
         return ok(nodeId, result.durationMs, result.stdout, 'clipboard');
       }
@@ -3179,7 +3179,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       node: z.string().optional().describe('Node (default: contabo)'),
     },
     async ({ command, path, node }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const result = await manager.exec(nodeId, `cd "${path}" && git ${command}`);
       const shortCmd = command.split(' ').slice(0, 2).join(' ');
       if (result.code !== 0) return fail(`${nodeId} git ${shortCmd}: ${result.stderr}`);
@@ -3279,7 +3279,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
 
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
-        const nodeId = step.node ?? 'contabo';
+        const nodeId = step.node ?? getDbNode();
         let cmd = step.command
           .replace(/\{\{prev\}\}/g, prevStdout.trim())
           .replace(/\{\{step(\d+)\}\}/g, (_, n) => stepOutputs[parseInt(n)] ?? '')
@@ -3330,7 +3330,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       store_as: z.string().optional().describe('Store matching stdout on success'),
     },
     async ({ node, command, assert: pattern, interval, timeout, label, store_as }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const intervalMs = (interval ?? 3) * 1000;
       const timeoutMs = (timeout ?? 60) * 1000;
       const regex = new RegExp(pattern);
@@ -3408,7 +3408,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       label: z.string().optional(),
     },
     async ({ action, node, command, task_id, label }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const taskDir = '/tmp/.omniwire-tasks';
 
       if (action === 'dispatch') {
@@ -3467,7 +3467,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       schema: z.enum(['text', 'json', 'any']).optional().describe('Message format validation. json=must be valid JSON, text=plain string, any=no validation (default).'),
     },
     async ({ action, channel, node, message, sender, count, schema }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const queueDir = '/tmp/.omniwire-a2a';
 
       if (action === 'send') {
@@ -3527,7 +3527,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       ttl: z.number().optional().describe('Lock TTL in seconds (default: 300). Auto-releases after TTL.'),
     },
     async ({ action, lock_name, node, owner, ttl }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const lockDir = '/tmp/.omniwire-locks';
       const ttlSec = ttl ?? 300;
 
@@ -3587,7 +3587,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       filter: z.string().optional().describe('Regex filter applied to event data during poll. Only matching events returned.'),
     },
     async ({ action, topic, node, data, source, since, limit, filter }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const eventDir = '/tmp/.omniwire-events';
       const n = limit ?? 10;
 
@@ -3646,7 +3646,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       format: z.enum(['text', 'json']).optional(),
     },
     async ({ action, name, node, definition, format }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const wfDir = '/tmp/.omniwire-workflows';
       const useJson = format === 'json';
 
@@ -3724,7 +3724,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       capability: z.string().optional().describe('Capability to search for (discover action)'),
     },
     async ({ action, node, agent_id, capabilities, metadata, capability }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const regDir = '/tmp/.omniwire-agents';
 
       if (action === 'register') {
@@ -3775,7 +3775,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       limit: z.number().optional().describe('Max entries (default: 20)'),
     },
     async ({ action, node, topic, content, author, query, limit }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const bbDir = '/tmp/.omniwire-blackboard';
       const n = limit ?? 20;
 
@@ -3831,7 +3831,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       error: z.string().optional().describe('Error message for fail'),
     },
     async ({ action, node, queue, task, priority, task_id, result: taskResult, error: taskError }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const qName = queue ?? 'default';
       const qDir = `/tmp/.omniwire-taskq/${qName}`;
 
@@ -3999,7 +3999,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         if (!name) return fail('name required');
         const template = aliasStore.get(name);
         if (!template) return fail(`alias ${name} not found`);
-        const nodeId = node ?? 'contabo';
+        const nodeId = node ?? getDbNode();
         const resolved = template.replace(/\{\{(\w+)\}\}/g, (_, key) => resultStore.get(key) ?? `{{${key}}}`);
         const result = await manager.exec(nodeId, resolved);
         return ok(nodeId, result.durationMs, fmtExecOutput(result, 30), `alias:${name}`);
@@ -4240,7 +4240,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
       plugin_name: z.string().optional().describe('Plugin file name without .js extension (for load/unload/info)'),
     },
     async ({ action, node, plugin_name }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const pluginDirs = ['/etc/omniwire/plugins', '~/.omniwire/plugins'];
 
       if (action === 'list') {
@@ -4331,12 +4331,12 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
     },
     async (args) => {
       const { action, name, secret, issuer, code: verifyCode, algorithm, digits, period, format, node: targetNode } = args;
-      const nodeId = targetNode ?? 'contabo';
+      const nodeId = targetNode ?? getDbNode();
 
       // Load from CyberBase on first access if memory is empty
       if (twoFaStore.size === 0 && cbManager) {
         try {
-          const r = await cbManager.exec('contabo', pgExec(`SELECT key, value FROM knowledge WHERE source_tool = 'omniwire' AND key LIKE '2fa:%' LIMIT 100`));
+          const r = await cbManager.exec(getDbNode(), pgExec(`SELECT key, value FROM knowledge WHERE source_tool = 'omniwire' AND key LIKE '2fa:%' LIMIT 100`));
           if (r.code === 0 && r.stdout) {
             for (const line of r.stdout.split('\n')) {
               const match = line.match(/^\s*2fa:(\S+)\s*\|\s*(.+)/);
@@ -4528,7 +4528,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         if (!cbManager) return fail('CyberBase manager not initialized');
         // Also ping the database
         try {
-          const r = await cbManager.exec('contabo', pgExec("SELECT 'ok' AS status, count(*) AS total FROM knowledge;"));
+          const r = await cbManager.exec(getDbNode(), pgExec("SELECT 'ok' AS status, count(*) AS total FROM knowledge;"));
           return okBrief(`CyberBase health:\n  DB: ${r.stdout.includes('ok') ? 'OK' : 'UNREACHABLE'}\n  Circuit: ${h.healthy ? 'CLOSED (healthy)' : 'OPEN (paused)'}\n  Fails: ${h.failCount}\n  Queue: ${h.queueSize}\n  Last error: ${h.lastError || '(none)'}\n${r.stdout.trim()}`);
         } catch (e) {
           return okBrief(`CyberBase health: UNREACHABLE\n  Circuit: ${h.healthy ? 'CLOSED' : 'OPEN'}\n  Fails: ${h.failCount}\n  Error: ${(e as Error).message}`);
@@ -4537,14 +4537,14 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
 
       if (action === 'stats') {
         if (!cbManager) return fail('no CyberBase connection');
-        const r = await cbManager.exec('contabo', pgExec("SELECT source_tool, count(*) as cnt FROM knowledge GROUP BY source_tool ORDER BY cnt DESC LIMIT 20;"));
+        const r = await cbManager.exec(getDbNode(), pgExec("SELECT source_tool, count(*) as cnt FROM knowledge GROUP BY source_tool ORDER BY cnt DESC LIMIT 20;"));
         return okBrief(`CyberBase stats:\n${r.stdout.trim()}`);
       }
 
       if (action === 'categories') {
         if (!cbManager) return fail('no CyberBase connection');
         const src = source ?? 'omniwire';
-        const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s'; SELECT DISTINCT split_part(key, ':', 1) AS cat, count(*) FROM knowledge WHERE source_tool='${sqlEscape(src)}' GROUP BY cat ORDER BY count DESC LIMIT 50;" 2>/dev/null`);
+        const r = await cbManager.exec(getDbNode(), `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='5s'; SELECT DISTINCT split_part(key, ':', 1) AS cat, count(*) FROM knowledge WHERE source_tool='${sqlEscape(src)}' GROUP BY cat ORDER BY count DESC LIMIT 50;" 2>/dev/null`);
         return okBrief(`Categories (${src}):\n${r.stdout.trim()}`);
       }
 
@@ -4565,7 +4565,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         if (!key) return fail('key required');
         if (!cbManager) return fail('no CyberBase connection');
         const fullKey = sqlEscape(category ? `${category}:${key}` : key);
-        const r = await cbManager.exec('contabo', pgExec(`DELETE FROM knowledge WHERE source_tool='omniwire' AND key='${fullKey}';`));
+        const r = await cbManager.exec(getDbNode(), pgExec(`DELETE FROM knowledge WHERE source_tool='omniwire' AND key='${fullKey}';`));
         return okBrief(`deleted: ${fullKey} ${r.stdout.includes('DELETE') ? 'OK' : 'WARN: may not exist'}`);
       }
 
@@ -4600,13 +4600,13 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         if (!cbManager) return fail('no CyberBase connection');
         const src = source ?? 'omniwire';
         const catFilter = category ? `AND key LIKE '${sqlEscape(category)}:%'` : '';
-        const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='10s'; SELECT json_agg(json_build_object('key', key, 'value', value->>'data', 'updated', updated_at)) FROM knowledge WHERE source_tool='${sqlEscape(src)}' ${catFilter} LIMIT ${lim};" 2>/dev/null`);
+        const r = await cbManager.exec(getDbNode(), `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -c "SET statement_timeout='10s'; SELECT json_agg(json_build_object('key', key, 'value', value->>'data', 'updated', updated_at)) FROM knowledge WHERE source_tool='${sqlEscape(src)}' ${catFilter} LIMIT ${lim};" 2>/dev/null`);
         return okBrief(r.stdout.trim() || '(no data)');
       }
 
       if (action === 'vacuum') {
         if (!cbManager) return fail('no CyberBase connection');
-        const r = await cbManager.exec('contabo', pgExec("DELETE FROM knowledge WHERE value IS NULL OR value::text = 'null' OR key = ''; VACUUM ANALYZE knowledge;"));
+        const r = await cbManager.exec(getDbNode(), pgExec("DELETE FROM knowledge WHERE value IS NULL OR value::text = 'null' OR key = ''; VACUUM ANALYZE knowledge;"));
         return okBrief(`vacuum complete:\n${r.stdout.trim()}`);
       }
 
@@ -4702,7 +4702,7 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
         if (!cbManager) return fail('no CyberBase connection');
         ensureVault();
         // Export all knowledge entries from PostgreSQL and write as .md files
-        const r = await cbManager.exec('contabo', `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -A -F '|' -c "SET statement_timeout='30s'; SELECT key, value->>'data', updated_at FROM knowledge WHERE source_tool='omniwire' ORDER BY key;" 2>/dev/null`);
+        const r = await cbManager.exec(getDbNode(), `psql -h 127.0.0.1 -U cyberbase -d cyberbase -t -A -F '|' -c "SET statement_timeout='30s'; SELECT key, value->>'data', updated_at FROM knowledge WHERE source_tool='omniwire' ORDER BY key;" 2>/dev/null`);
         if (!r.stdout.trim()) return okBrief('mirror-db: no entries found in CyberBase');
         const lines = r.stdout.trim().split('\n').filter((l: string) => l.includes('|'));
         let synced = 0;
@@ -4758,8 +4758,8 @@ echo "port-knock configured: ${ports.join(' -> ')} -> port ${target}"`;
     async ({ action, url, urls, mode, extraction_type, css_selector, xpath, solve_cloudflare, wait_selector, network_idle, proxy, via_vpn, timeout, impersonate, adaptive, disable_resources, node: targetNode, label }) => {
       if (!manager) return fail('NodeManager not initialized');
 
-      // Auto-select best node: prefer contabo (has Scrapling + browsers installed)
-      const target = targetNode ?? 'contabo';
+      // Auto-select best node: prefer the docker/compute node (has Scrapling + browsers installed)
+      const target = targetNode ?? getDockerNode();
 
       // --- Action: install ---
       if (action === 'install') {
@@ -4970,21 +4970,21 @@ print(json.dumps(results))
       nat_forward: z.boolean().optional().describe('Enable NAT forwarding / IP masquerade (for init, default: false)'),
     },
     async ({ action, node, interface: iface, peer_id, peer_pubkey, peer_endpoint, peer_mesh_ip, peer_psk, mesh_ip, listen_port, private_key, topology_type, hub_node, dns, nat_forward }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const wgIface = iface ?? 'omnimesh0';
       const port = listen_port ?? 51820;
       const configDir = '/etc/omniwire/omnimesh';
 
       // Helper: exec on one or all nodes
       const execOn = async (nid: string, cmd: string): Promise<{ nodeId: string; stdout: string; stderr: string; code: number; durationMs: number }> => {
-        if (nid === 'windows') {
+        if (nid === getLocalNodeId() && findNode(nid)?.os === 'windows') {
           // Local Windows execution via powershell
           const { execSync } = await import('node:child_process');
           try {
             const out = execSync(cmd, { timeout: 15000, encoding: 'utf-8' });
-            return { nodeId: 'windows', stdout: out, stderr: '', code: 0, durationMs: 0 };
+            return { nodeId: getLocalNodeId(), stdout: out, stderr: '', code: 0, durationMs: 0 };
           } catch (e: any) {
-            return { nodeId: 'windows', stdout: e.stdout ?? '', stderr: e.stderr ?? e.message, code: e.status ?? 1, durationMs: 0 };
+            return { nodeId: getLocalNodeId(), stdout: e.stdout ?? '', stderr: e.stderr ?? e.message, code: e.status ?? 1, durationMs: 0 };
           }
         }
         return manager.exec(nid, cmd);
@@ -5013,7 +5013,7 @@ print(json.dumps(results))
       if (action === 'install') {
         const output = await execAll((nid) => {
           const nodeConf = findNode(nid);
-          const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+          const os = nodeConf?.os ?? 'linux';
           return `${checkInstalledCmd(os)} && echo "already installed" || (${installCmd(os)})`;
         });
         return okBrief(`WireGuard install:\n${output}`);
@@ -5021,7 +5021,7 @@ print(json.dumps(results))
 
       if (action === 'genkeys') {
         const nodeConf = findNode(nodeId);
-        const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+        const os = nodeConf?.os ?? 'linux';
         const r = await execOn(nodeId, genKeysCmd(os));
         const keys = parseKeys(r.stdout);
         // Save keys to config dir
@@ -5034,7 +5034,7 @@ print(json.dumps(results))
       if (action === 'init') {
         if (!mesh_ip) return fail('mesh_ip required (e.g., 10.10.0.1)');
         const nodeConf = findNode(nodeId);
-        const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+        const os = nodeConf?.os ?? 'linux';
 
         // Generate keys if not provided
         let privKey = private_key;
@@ -5069,14 +5069,14 @@ print(json.dumps(results))
 
       if (action === 'up') {
         const nodeConf = findNode(nodeId);
-        const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+        const os = nodeConf?.os ?? 'linux';
         const output = await execAll(bringUpCmd(os, wgIface));
         return okBrief(`OmniMesh up:\n${output}`);
       }
 
       if (action === 'down') {
         const nodeConf = findNode(nodeId);
-        const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+        const os = nodeConf?.os ?? 'linux';
         const output = await execAll(bringDownCmd(os, wgIface));
         return okBrief(`OmniMesh down:\n${output}`);
       }
@@ -5143,7 +5143,7 @@ print(json.dumps(results))
 
       if (action === 'rotate-keys') {
         const nodeConf = findNode(nodeId);
-        const os = nodeConf?.os === 'windows' ? 'windows' : 'linux';
+        const os = nodeConf?.os ?? 'linux';
         const r = await execOn(nodeId, rotateKeyCmd(wgIface, os));
         const keys = parseKeys(r.stdout);
         if (keys.publicKey) {
@@ -5326,7 +5326,7 @@ print(json.dumps(results))
       source_node: z.string().optional().describe('For expose-remote: which node\'s localhost to expose'),
     },
     async ({ action, node, port, mesh_port, protocol, name, bind, source_node }) => {
-      const nodeId = node ?? 'contabo';
+      const nodeId = node ?? getDbNode();
       const proto = protocol ?? 'tcp';
       const stateDir = '/tmp/.omniwire-mesh-expose';
       const initCmd = `mkdir -p ${stateDir}`;
@@ -5507,7 +5507,7 @@ print(json.dumps(results))
         if (!port) return fail('port required');
         const label = ruleName ?? `port-${port}`;
         // Save rule on contabo (hub node)
-        const r = await manager.exec('contabo', [
+        const r = await manager.exec(getDbNode(), [
           `mkdir -p /etc/omniwire`,
           `[ -f "${rulesFile}" ] && rules=$(cat "${rulesFile}") || rules='[]'`,
           `echo "$rules" | jq --arg p "${port}" --arg n "${label}" '. + [{"port": ($p|tonumber), "name": $n}] | unique_by(.port)' > "${rulesFile}"`,
@@ -5518,7 +5518,7 @@ print(json.dumps(results))
 
       if (action === 'remove-rule') {
         if (!port) return fail('port required');
-        const r = await manager.exec('contabo', [
+        const r = await manager.exec(getDbNode(), [
           `[ -f "${rulesFile}" ] || { echo "no rules file"; exit 0; }`,
           `jq --arg p "${port}" 'map(select(.port != ($p|tonumber)))' "${rulesFile}" > "${rulesFile}.tmp" && mv "${rulesFile}.tmp" "${rulesFile}"`,
           `cat "${rulesFile}"`,

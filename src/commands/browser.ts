@@ -19,9 +19,14 @@ export async function openBrowser(
   }
 
   // Build open command based on OS — runs on remote node via SSH
-  const openCmd = node.os === 'windows'
-    ? `cmd.exe /c start "" "${url}"`
-    : `xdg-open "${url}" 2>/dev/null || sensible-browser "${url}" 2>/dev/null || firefox "${url}" 2>/dev/null || chromium-browser "${url}" 2>/dev/null &`;
+  let openCmd: string;
+  if (node.os === 'darwin') {
+    openCmd = `open "${url}"`;
+  } else if (node.os === 'windows') {
+    openCmd = `cmd.exe /c start "" "${url}"`;
+  } else {
+    openCmd = `xdg-open "${url}" 2>/dev/null || sensible-browser "${url}" 2>/dev/null || firefox "${url}" 2>/dev/null || chromium-browser "${url}" 2>/dev/null &`;
+  }
 
   const result = await manager.exec(node.id, openCmd);
   if (result.code !== 0 && result.stderr) {

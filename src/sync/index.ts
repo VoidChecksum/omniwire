@@ -14,29 +14,16 @@ import { OpenClawBridge } from './openclaw-bridge.js';
 import { getManifests } from './manifest.js';
 import { NodeManager } from '../nodes/manager.js';
 import { TransferEngine } from '../nodes/transfer.js';
-import { allNodes } from '../protocol/config.js';
+import { allNodes, getLocalNodeId } from '../protocol/config.js';
 import type { SyncConfig } from './types.js';
 import { DEFAULT_SYNC_CONFIG } from './types.js';
 
 function parseArgs(argv: string[]): { nodeId: string; once: boolean; ingestOnly: boolean } {
   const nodeIdx = argv.indexOf('--node');
-  const nodeId = nodeIdx !== -1 && argv[nodeIdx + 1] ? argv[nodeIdx + 1] : detectNodeId();
+  const nodeId = nodeIdx !== -1 && argv[nodeIdx + 1] ? argv[nodeIdx + 1] : getLocalNodeId();
   const once = argv.includes('--once');
   const ingestOnly = argv.includes('--ingest-only');
   return { nodeId, once, ingestOnly };
-}
-
-function detectNodeId(): string {
-  const platform = process.platform;
-  if (platform === 'win32') return 'windows';
-
-  // Check hostname-based detection
-  const hostname = (process.env.HOSTNAME ?? '').toLowerCase();
-  if (hostname.includes('contabo')) return 'contabo';
-  if (hostname.includes('hostinger')) return 'hostinger';
-  if (hostname.includes('thinkpad')) return 'thinkpad';
-
-  return 'unknown';
 }
 
 async function main(): Promise<void> {

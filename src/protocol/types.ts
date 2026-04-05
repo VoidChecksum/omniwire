@@ -7,7 +7,7 @@ export interface MeshNode {
   readonly port: number;
   readonly user: string;
   readonly identityFile: string;
-  readonly os: 'linux' | 'windows';
+  readonly os: 'linux' | 'windows' | 'darwin';
   readonly isLocal: boolean;
   readonly tags: readonly string[];
 }
@@ -38,7 +38,7 @@ export interface ParsedCommand {
   readonly raw: string;
 }
 
-export type NodeRole = 'controller' | 'storage' | 'compute' | 'gpu+browser';
+export type NodeRole = string;
 
 export type CommandTarget =
   | { type: 'node'; nodeId: string }
