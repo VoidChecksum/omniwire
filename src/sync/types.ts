@@ -1,4 +1,6 @@
-// CyberSync â Type definitions for unified mesh sync
+import { getDbCredentials } from '../protocol/config.js';
+
+// CyberSyncâ Type definitions for unified mesh sync
 
 export interface SyncItem {
   readonly id: string;
@@ -116,12 +118,13 @@ function parseDbUrl(): Partial<Pick<SyncConfig, 'pgHost' | 'pgPort' | 'pgDatabas
 }
 
 const _dbUrl = parseDbUrl();
+const _dbCreds = getDbCredentials();
 
 export const DEFAULT_SYNC_CONFIG: Omit<SyncConfig, 'nodeId'> = {
-  pgHost: _dbUrl.pgHost ?? '10.10.0.1',
-  pgPort: _dbUrl.pgPort ?? 5432,
-  pgDatabase: _dbUrl.pgDatabase ?? 'cyberbase',
-  pgUser: _dbUrl.pgUser ?? 'cyberbase',
+  pgHost: _dbUrl.pgHost ?? _dbCreds.host,
+  pgPort: _dbUrl.pgPort ?? _dbCreds.port,
+  pgDatabase: _dbUrl.pgDatabase ?? _dbCreds.database,
+  pgUser: _dbUrl.pgUser ?? _dbCreds.user,
   pgPassword: _dbUrl.pgPassword ?? process.env.OW_PG_PASSWORD ?? 'cyberbase',
   watchDebounceMs: 300,
   reconcileIntervalMs: 2 * 60 * 1000,  // 2min (was 5min)  faster convergence
