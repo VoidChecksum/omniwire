@@ -25,6 +25,7 @@ const useJson = args.includes('--json');
 const ssePort = parseInt(args.find((a) => a.startsWith('--sse-port='))?.split('=')[1] ?? '3200');
 const restPort = parseInt(args.find((a) => a.startsWith('--rest-port='))?.split('=')[1] ?? '3201');
 const eventPort = parseInt(args.find((a) => a.startsWith('--event-port='))?.split('=')[1] ?? '3202');
+const bindAddr = args.find((a) => a.startsWith('--bind='))?.split('=')[1] ?? '127.0.0.1';
 const noSync = args.includes('--no-sync');
 const noEvents = args.includes('--no-events');
 
@@ -89,13 +90,13 @@ async function main(): Promise<void> {
     const transport = new StdioServerTransport();
     await server.connect(transport);
   } else {
-    startSSEServer(server, ssePort);
-    startRESTServer(manager, transfer, restPort);
+    startSSEServer(server, ssePort, bindAddr);
+    startRESTServer(manager, transfer, restPort, bindAddr);
     if (!noEvents) {
-      startEventServer(eventPort);
-      log(`Events: WS+SSE+Webhooks on :${eventPort}`, { eventPort });
+      startEventServer(eventPort, bindAddr);
+      log(`Events: WS+SSE+Webhooks on ${bindAddr}:${eventPort}`, { eventPort });
     }
-    log(`OmniWire MCP: SSE on :${ssePort}, REST on :${restPort}`, { ssePort, restPort });
+    log(`OmniWire MCP: SSE on ${bindAddr}:${ssePort}, REST on ${bindAddr}:${restPort}`, { ssePort, restPort });
   }
 
   process.on('SIGINT', async () => {
