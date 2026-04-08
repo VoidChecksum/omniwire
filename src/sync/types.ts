@@ -96,12 +96,33 @@ export interface SyncConfig {
   readonly reconcileIntervalMs: number;
 }
 
+// Parse CYBERSYNC_DB_URL (postgresql://user:pass@host:port/db) if set
+function parseDbUrl(): Partial<Pick<SyncConfig, 'pgHost' | 'pgPort' | 'pgDatabase' | 'pgUser' | 'pgPassword'>> {
+  const url = process.env.CYBERSYNC_DB_URL;
+  if (!url) return {};
+  try {
+    const u = new URL(url);
+    return {
+      pgHost: u.hostname || undefined,
+      pgPort: u.port ? parseInt(u.port, 10) : undefined,
+      pgDatabase: u.pathname.slice(1) || undefined,
+      pgUser: decodeURIComponent(u.username) || undefined,
+      pgPassword: decodeURIComponent(u.password) || undefined,
+    };
+  } catch {
+    process.stderr.write(`Warning: invalid CYBERSYNC_DB_URL, using defaults\n`);
+    return {};
+  }
+}
+
+const _dbUrl = parseDbUrl();
+
 export const DEFAULT_SYNC_CONFIG: Omit<SyncConfig, 'nodeId'> = {
-  pgHost: '10.10.0.1',
-  pgPort: 5432,
-  pgDatabase: 'cyberbase',
-  pgUser: 'cyberbase',
-  pgPassword: process.env.OW_PG_PASSWORD ?? 'cyberbase',
+  pgHost: _dbUrl.pgHost ?? '10.10.0.1',
+  pgPort: _dbUrl.pgPort ?? 5432,
+  pgDatabase: _dbUrl.pgDatabase ?? 'cyberbase',
+  pgUser: _dbUrl.pgUser ?? 'cyberbase',
+  pgPassword: _dbUrl.pgPassword ?? process.env.OW_PG_PASSWORD ?? 'cyberbase',
   watchDebounceMs: 300,
   reconcileIntervalMs: 2 * 60 * 1000,  // 2min (was 5min)  faster convergence
 };
