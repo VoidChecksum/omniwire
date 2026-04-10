@@ -99,11 +99,49 @@ async function main(): Promise<void> {
     log(`OmniWire MCP: SSE on ${bindAddr}:${ssePort}, REST on ${bindAddr}:${restPort}`, { ssePort, restPort });
   }
 
-  process.on('SIGINT', async () => {
-    if (syncDb) await syncDb.close();
-    manager.disconnect();
+  let shuttingDown = false;
+  const shutdown = async (reason: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(`shutdown: ${reason}`, { shutdown: true, reason });
+    try { if (syncDb) await syncDb.close(); } catch { /* best effort */ }
+    try { manager.disconnect(); } catch { /* best effort */ }
     process.exit(0);
-  });
+  };
+
+  // Signal-based shutdown — applies to both stdio and SSE transports.
+  // MCP SDK client kill ladder: stdin.end() -> SIGTERM -> SIGKILL.
+  process.on('SIGINT', () => { void shutdown('SIGINT'); });
+  process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+  process.on('SIGHUP', () => { void shutdown('SIGHUP'); });
+
+  if (useStdio) {
+    // StdioServerTransport only registers 'data'/'error' on stdin and never
+    // closes it, so 'end'/'close' only fire when the parent closes the pipe.
+    process.stdin.on('end', () => { void shutdown('stdin-end'); });
+    process.stdin.on('close', () => { void shutdown('stdin-close'); });
+
+    // Parent-PID watchdog: NodeManager's ssh2 keepalive pins the event loop,
+    // so Node won't exit naturally when the parent dies. Poll ppid and probe
+    // parent existence every 5s. Unref so the timer itself doesn't keep us
+    // alive.
+    const initialPpid = process.ppid;
+    const ppidTimer = setInterval(() => {
+      const currentPpid = process.ppid;
+      if (currentPpid !== initialPpid || currentPpid <= 1) {
+        void shutdown('parent-gone (reparent)');
+        return;
+      }
+      try {
+        process.kill(currentPpid, 0);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ESRCH') {
+          void shutdown('parent-gone (ESRCH)');
+        }
+      }
+    }, 5_000);
+    ppidTimer.unref();
+  }
 }
 
 main().catch((err) => {
