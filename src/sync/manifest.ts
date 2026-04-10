@@ -1,7 +1,7 @@
 // CyberSync — Tool manifests defining what to sync per AI tool
 
 import type { ToolManifest, ToolName } from './types.js';
-import { getToolBaseDir } from './paths.js';
+import { getHomeForOs, getToolBaseDir } from './paths.js';
 
 function manifest(tool: ToolName, os: 'windows' | 'linux', sync: string[], exclude: string[], ingestDb?: string, ingestDirs?: string[]): ToolManifest {
   return {
@@ -15,7 +15,7 @@ function manifest(tool: ToolName, os: 'windows' | 'linux', sync: string[], exclu
 }
 
 export function getManifests(os: 'windows' | 'linux'): readonly ToolManifest[] {
-  const home = os === 'windows' ? 'C:/Users/Admin' : '/root';
+  const home = getHomeForOs(os);
 
   return [
     manifest('claude-code', os,

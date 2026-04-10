@@ -1,8 +1,24 @@
 // CyberSync — Windows/Linux path adaptation for JSON content
 
-const WIN_HOME = 'C:/Users/Admin';
-const WIN_HOME_BACKSLASH = 'C:\\Users\\Admin';
-const LINUX_HOME = '/root';
+import { homedir } from 'node:os';
+
+// Upstream defaults preserve container-style assumptions:
+//   Windows -> C:/Users/Admin (upstream author's username)
+//   Linux   -> /root (upstream runs as root inside containers)
+//
+// OMNIWIRE_{WIN,LINUX}_HOME env vars override these, so non-root Linux
+// hosts and Windows hosts with different usernames can deploy without
+// forking. When the LINUX override is unset, we detect root vs non-root
+// so upstream's root-container behavior is unchanged.
+const WIN_HOME = (process.env.OMNIWIRE_WIN_HOME ?? 'C:/Users/Admin').replaceAll('\\', '/');
+const WIN_HOME_BACKSLASH = WIN_HOME.replaceAll('/', '\\');
+const LINUX_HOME = process.env.OMNIWIRE_LINUX_HOME
+  ?? (process.getuid?.() === 0 ? '/root' : homedir());
+
+/** Returns the canonical home directory for the given OS target */
+export function getHomeForOs(os: 'windows' | 'linux'): string {
+  return os === 'windows' ? WIN_HOME : LINUX_HOME;
+}
 
 const PATH_MAPS: ReadonlyArray<readonly [string, string]> = [
   [WIN_HOME_BACKSLASH, LINUX_HOME],
