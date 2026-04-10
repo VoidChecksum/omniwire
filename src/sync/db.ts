@@ -17,7 +17,7 @@ export class SyncDB {
       max: 8,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 5_000,
-      statement_timeout: 10_000,
+      statement_timeout: process.env.CYBERSYNC_STATEMENT_TIMEOUT_MS ? Number(process.env.CYBERSYNC_STATEMENT_TIMEOUT_MS) : 10_000,
     });
   }
 
