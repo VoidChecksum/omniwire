@@ -618,7 +618,8 @@ watch(assert="ready")       poll until
 - All remote execution via `ssh2.Client.exec()` -- never `child_process.exec()`
 - Key-based auth only, no passwords stored, SSH key caching
 - Multi-path failover: WireGuard -> Tailscale -> Public IP
-- XChaCha20-Poly1305 at-rest encryption for synced configs
+- Secret-bearing tool output is redacted by default (`omniwire_env` lists keys, not values)
+- Prefer 1Password or another managed vault for production secrets; file/env backends are local-development fallbacks
 - 2MB output guard prevents memory exhaustion
 - 4KB auto-truncation prevents context window bloat
 - Circuit breaker isolates failing nodes
@@ -767,9 +768,10 @@ omniwire_mesh_status()   # 88 tools should be available
 | `CYBERSYNC_DB_URL` | Optional | PostgreSQL DSN — defaults to `postgresql://cyberbase@10.0.0.1:5432/cyberbase` |
 | `OMNIWIRE_MESH_CONFIG` | Optional | Override mesh.json path |
 
-Set persistently on a node:
+Set persistently on a node. Values are written to `/etc/environment`, but tool responses only confirm whether a value is set and never echo the secret back:
 ```bash
-omniwire_env(action="set", key="OP_SERVICE_ACCOUNT_TOKEN", value="<token>", node="node-a", persist=true)
+omniwire_env(action="set", key="OP_SERVICE_ACCOUNT_TOKEN", value="<token>", node="node-a")
+omniwire_env(action="get", key="OP_SERVICE_ACCOUNT_TOKEN", node="node-a")  # OP_SERVICE_ACCOUNT_TOKEN=<redacted: set>
 ```
 
 ### CyberSync Auto-Distribution

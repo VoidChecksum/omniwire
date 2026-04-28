@@ -15,6 +15,7 @@ import { ShellManager, kernelExec } from '../nodes/shell.js';
 import { RealtimeChannel } from '../nodes/realtime.js';
 import { TunnelManager } from '../nodes/tunnel.js';
 import { openBrowser } from '../commands/browser.js';
+import { describeEnvValue, formatEnvKeyListing, isValidEnvKey } from '../security/redaction.js';
 import { allNodes, remoteNodes, findNode, NODE_ROLES, getDefaultNodeForTask, CONFIG } from '../protocol/config.js';
 import { parseMeshPath } from '../protocol/paths.js';
 import {
@@ -1455,21 +1456,68 @@ tags: ${meshNode.tags.join(', ')}`;
       value: z.string().optional().describe('Variable value (for set)'),
     },
     async ({ action, node, key, value }) => {
+      if (key && !isValidEnvKey(key)) return fail('invalid environment variable name');
+
       if (action === 'list') {
-        const result = await manager.exec(node, 'cat /etc/environment 2>/dev/null; echo "---"; env | sort | head -40');
-        return ok(node, result.durationMs, result.stdout, 'env list');
+        const result = await manager.exec(node, `python3 - <<'PY'
+import os, pathlib, re
+valid = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,127}$')
+keys = set()
+path = pathlib.Path('/etc/environment')
+if path.exists():
+    for line in path.read_text(errors='ignore').splitlines():
+        if '=' in line and not line.lstrip().startswith('#'):
+            k = line.split('=', 1)[0].strip()
+            if valid.match(k):
+                keys.add(k)
+for k in os.environ:
+    if valid.match(k):
+        keys.add(k)
+print('\n'.join(sorted(keys)))
+PY`);
+        const keys = result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+        return ok(node, result.durationMs, formatEnvKeyListing(keys), 'env keys');
       }
       if (action === 'get' && key) {
-        const result = await manager.exec(node, `bash -c 'source /etc/environment 2>/dev/null; echo "\${${key}}"'`);
-        const val = result.stdout.trim();
-        return okBrief(`${node} ${key}=${val || '(unset)'}`);
+        const result = await manager.exec(node, `python3 - <<'PY'
+import os, pathlib
+key = ${JSON.stringify(key)}
+value = None
+path = pathlib.Path('/etc/environment')
+if path.exists():
+    for line in path.read_text(errors='ignore').splitlines():
+        if line.startswith(key + '='):
+            value = line.split('=', 1)[1]
+if value is None:
+    value = os.environ.get(key)
+print(value or '')
+PY`);
+        return okBrief(`${node} ${key}=${describeEnvValue(result.stdout.trim())}`);
       }
       if (action === 'set' && key && value !== undefined) {
-        const esc = value.replace(/'/g, "'\\''");
-        const result = await manager.exec(node, `grep -q '^${key}=' /etc/environment 2>/dev/null && sed -i 's|^${key}=.*|${key}=${esc}|' /etc/environment || echo '${key}=${esc}' >> /etc/environment`);
+        if (value.includes('\n') || value.includes('\0')) return fail('environment value must be a single line');
+        const encodedValue = Buffer.from(value, 'utf8').toString('base64');
+        const result = await manager.exec(node, `python3 - <<'PY'
+import base64, pathlib
+key = ${JSON.stringify(key)}
+value = base64.b64decode(${JSON.stringify(encodedValue)}).decode('utf-8')
+path = pathlib.Path('/etc/environment')
+lines = path.read_text(errors='ignore').splitlines() if path.exists() else []
+out = []
+seen = False
+for line in lines:
+    if line.startswith(key + '='):
+        out.append(f'{key}={value}')
+        seen = True
+    else:
+        out.append(line)
+if not seen:
+    out.append(f'{key}={value}')
+path.write_text('\n'.join(out) + '\n')
+PY`);
         return result.code === 0
-          ? okBrief(`${node} ${key}=${value.slice(0, 40)} (persisted)`)
-          : fail(`${node} env set: ${result.stderr}`);
+          ? okBrief(`${node} ${key}=${describeEnvValue(value)} (persisted)`)
+          : fail(`${node} env set failed`);
       }
       return fail('invalid action/params');
     }
