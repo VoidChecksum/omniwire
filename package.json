@@ -31,7 +31,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@noble/ciphers": "^2.1.1",
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^12.9.0",
     "chalk": "^5.4.1",
     "chokidar": "^4.0.0",
     "pg": "^8.13.0",
